@@ -1,0 +1,1819 @@
+#!/usr/bin/env python3
+"""
+IPO Command Center — multi-account Indian IPO tracker.
+Single-file backend: FastAPI + SQLite.
+Run:  python3 server.py   (then open http://localhost:8000)
+"""
+
+import base64
+import hashlib
+import json
+import os
+import re
+import secrets
+import sqlite3
+import threading
+import time
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def ist_now():
+    return datetime.now(IST)
+
+import requests
+from fastapi import FastAPI, HTTPException, Body, Response, Request
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+
+BASE = Path(__file__).parent
+DATA = BASE / "data"
+DATA.mkdir(exist_ok=True)
+DB = Path(os.environ.get("IPO_DB", str(DATA / "ipo.db")))
+
+LOCK = threading.Lock()
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9"}
+
+# ----------------------------------------------------------------------------
+# DB
+# ----------------------------------------------------------------------------
+
+def get_db():
+    con = sqlite3.connect(DB, check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys=ON")
+    return con
+
+
+def init_db():
+    with LOCK, get_db() as con:
+        con.executescript("""
+        CREATE TABLE IF NOT EXISTS accounts(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            holder TEXT NOT NULL,
+            pan TEXT DEFAULT '',
+            cdsl TEXT DEFAULT '',
+            broker TEXT DEFAULT '',
+            bank TEXT DEFAULT '',
+            upi TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE TABLE IF NOT EXISTS ipos(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            registrar TEXT DEFAULT 'Other',
+            registrar_ref TEXT DEFAULT '',
+            open_date TEXT DEFAULT '',
+            close_date TEXT DEFAULT '',
+            price_min REAL DEFAULT 0,
+            price_max REAL DEFAULT 0,
+            lot_size INTEGER DEFAULT 0,
+            allotment_date TEXT DEFAULT '',
+            listing_date TEXT DEFAULT '',
+            board TEXT DEFAULT 'Mainboard',
+            symbol TEXT DEFAULT '',
+            cmp REAL DEFAULT 0,
+            gmp REAL DEFAULT 0,
+            source TEXT DEFAULT 'manual',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE TABLE IF NOT EXISTS applications(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ipo_id INTEGER NOT NULL REFERENCES ipos(id) ON DELETE CASCADE,
+            account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            applied INTEGER DEFAULT 1,
+            app_no TEXT DEFAULT '',
+            lots INTEGER DEFAULT 1,
+            category TEXT DEFAULT 'Retail',
+            amount REAL DEFAULT 0,
+            upi TEXT DEFAULT '',
+            mandate_status TEXT DEFAULT 'pending',     -- pending approved rejected expired
+            allotment TEXT DEFAULT 'pending',          -- pending allotted not_allotted
+            allotted_qty INTEGER DEFAULT 0,
+            refund TEXT DEFAULT 'na',                  -- na pending received
+            sell_qty INTEGER DEFAULT 0,
+            sell_price REAL DEFAULT 0,
+            sold_on TEXT DEFAULT '',
+            checked_note TEXT DEFAULT '',
+            updated_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(ipo_id, account_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_app_ipo ON applications(ipo_id);
+        CREATE TABLE IF NOT EXISTS push_subs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            endpoint TEXT UNIQUE,
+            sub_json TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT DEFAULT '');
+        CREATE TABLE IF NOT EXISTS gmp_hist(
+            ipo_id INTEGER NOT NULL,
+            day TEXT NOT NULL,
+            gmp REAL DEFAULT 0,
+            PRIMARY KEY (ipo_id, day)
+        );
+        """)
+init_db()
+
+
+def migrate():
+    with LOCK, get_db() as con:
+        for ddl in ("ALTER TABLE accounts ADD COLUMN auth_mode TEXT DEFAULT ''",
+                    "ALTER TABLE ipos ADD COLUMN cmp_at TEXT DEFAULT ''",
+                    "ALTER TABLE ipos ADD COLUMN sub_json TEXT DEFAULT ''",
+                    "ALTER TABLE ipos ADD COLUMN sub_at TEXT DEFAULT ''",
+                    "ALTER TABLE ipos ADD COLUMN mkt_json TEXT DEFAULT ''",
+                    "ALTER TABLE ipos ADD COLUMN mkt_at TEXT DEFAULT ''",
+                    "ALTER TABLE ipos ADD COLUMN gmp_feed REAL DEFAULT 0"):
+            try:
+                con.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
+        con.commit()
+
+
+migrate()
+
+import arthan  # noqa: E402 — market-intelligence engine (self-verifying IPO data)
+
+
+# ----------------------------------------------------------------------------
+# backup / restore
+# Render free tier has an EPHEMERAL filesystem: the SQLite file vanishes on
+# redeploys/restarts. So: (1) every change triggers a debounced backup saved
+# locally AND pushed to the user's private GitHub repo (when GITHUB_TOKEN and
+# GITHUB_REPO env vars are set); (2) on boot with an empty DB we auto-restore
+# from GitHub, then local file, then the seed backup that ships in the repo.
+# ----------------------------------------------------------------------------
+
+BACKUP_TABLES = ("accounts", "ipos", "applications", "push_subs", "kv")
+LOCAL_BACKUP = DATA / "live-backup.json"
+SEED_BACKUP = DATA / "seed-backup.json"
+_GH_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+_GH_REPO = os.environ.get("GITHUB_REPO", "").strip()  # "username/repo"
+_GH_PATH = "data/live-backup.json"
+_bak_timer = None
+
+
+def export_backup() -> dict:
+    with LOCK, get_db() as con:
+        tables = {t: [dict(r) for r in con.execute(f"SELECT * FROM {t} ORDER BY rowid")]
+                  for t in BACKUP_TABLES}
+    return {"version": 1, "app": "ipo-command-center",
+            "exported_at": ist_now().isoformat(timespec="seconds"),
+            "tables": tables}
+
+
+def restore_backup(payload: dict) -> dict:
+    tables = (payload or {}).get("tables") or {}
+    if not any(t in tables for t in BACKUP_TABLES):
+        raise ValueError("not an IPO Command Center backup file")
+    counts = {}
+    with LOCK, get_db() as con:
+        for t in BACKUP_TABLES:
+            rows = tables.get(t) or []
+            con.execute(f"DELETE FROM {t}")
+            if rows:
+                cols = list(rows[0].keys())
+                q = f"INSERT INTO {t} ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})"
+                con.executemany(q, [[r.get(c) for c in cols] for r in rows])
+            counts[t] = len(rows)
+    return counts
+
+
+def _gh_headers():
+    return {"Authorization": f"Bearer {_GH_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "ipo-command-center"}
+
+
+def _github_push(content: str):
+    api = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_PATH}"
+    sha = None
+    r = requests.get(api, headers=_gh_headers(), timeout=15)
+    if r.status_code == 200:
+        sha = r.json().get("sha")
+    body = {"message": "auto-backup",
+            "content": base64.b64encode(content.encode()).decode()}
+    if sha:
+        body["sha"] = sha
+    requests.put(api, headers=_gh_headers(), json=body, timeout=20).raise_for_status()
+
+
+def _github_fetch():
+    if not (_GH_TOKEN and _GH_REPO):
+        return None
+    try:
+        api = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_PATH}"
+        r = requests.get(api, headers=_gh_headers(), timeout=15)
+        if r.status_code != 200:
+            return None
+        return json.loads(base64.b64decode(r.json()["content"]).decode())
+    except Exception as e:
+        print("[backup] GitHub fetch failed:", e, flush=True)
+        return None
+
+
+def _do_backup():
+    try:
+        payload = json.dumps(export_backup(), ensure_ascii=False)
+        try:
+            LOCAL_BACKUP.write_text(payload, encoding="utf-8")
+        except Exception:
+            pass
+        if _GH_TOKEN and _GH_REPO:
+            try:
+                _github_push(payload)
+                print("[backup] pushed to GitHub", flush=True)
+            except Exception as e:
+                print("[backup] GitHub push failed (local copy kept):", e, flush=True)
+    except Exception as e:
+        print("[backup] failed:", e, flush=True)
+
+
+def schedule_backup():
+    global _bak_timer
+    if _bak_timer and _bak_timer.is_alive():
+        return
+    _bak_timer = threading.Timer(25.0, _do_backup)
+    _bak_timer.daemon = True
+    _bak_timer.start()
+
+
+def boot_restore():
+    with LOCK, get_db() as con:
+        n = con.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"]
+    if n:
+        return
+    candidates = [("GitHub", _github_fetch())]
+    for path, label in ((LOCAL_BACKUP, "local backup"), (SEED_BACKUP, "seed backup")):
+        try:
+            if path.exists():
+                candidates.append((label, json.loads(path.read_text(encoding="utf-8"))))
+        except Exception:
+            pass
+    for label, payload in candidates:
+        if payload:
+            try:
+                counts = restore_backup(payload)
+                print(f"[backup] restored from {label}: {counts}", flush=True)
+                return
+            except Exception as e:
+                print(f"[backup] restore from {label} failed: {e}", flush=True)
+    print("[backup] empty DB and no backup found — starting fresh", flush=True)
+
+
+boot_restore()
+
+
+# ----------------------------------------------------------------------------
+# Web Push (VAPID) — real notifications on the phone even when the app is closed
+# ----------------------------------------------------------------------------
+
+# VAPID keys: (1) env vars VAPID_PUB / VAPID_PRIV win; (2) else a pair is
+# generated once and persisted in kv (survives restarts); (3) in-repo default
+# only as a last-resort fallback so config-less boots still run.
+
+def _vapid_keys():
+    pub, priv = os.environ.get("VAPID_PUB", ""), os.environ.get("VAPID_PRIV", "")
+    if pub and priv:
+        return pub.strip(), priv.strip()
+    if _BAKED_VAPID_PUB and _BAKED_VAPID_PRIV:
+        return _BAKED_VAPID_PUB, _BAKED_VAPID_PRIV    # existing installs: stable keys
+    try:
+        cached = kv_get("vapid_keys")
+        if cached:
+            j = json.loads(cached)
+            if j.get("pub") and j.get("priv"):
+                return j["pub"], j["priv"]            # fresh installs: generated once, persisted
+    except Exception:
+        pass
+    try:
+        from py_vapid import Vapid
+        import base64
+        v = Vapid()
+        v.generate_keys()
+        raw = v.public_key.public_numbers()
+        x = raw.x.to_bytes(32, "big"); y = raw.y.to_bytes(32, "big")
+        pub = base64.urlsafe_b64encode(b"\x04" + x + y).rstrip(b"=").decode()
+        priv_val = v.private_key.private_numbers().private_value
+        priv = base64.urlsafe_b64encode(priv_val.to_bytes(32, "big")).rstrip(b"=").decode()
+        kv_set("vapid_keys", json.dumps({"pub": pub, "priv": priv}))
+        print("[push] generated fresh VAPID keypair for this install", flush=True)
+        return pub, priv
+    except Exception as e:
+        print("[push] VAPID generation failed:", e, flush=True)
+        return "", ""
+
+_BAKED_VAPID_PUB = ""
+_BAKED_VAPID_PRIV = ""
+VAPID_PUB, VAPID_PRIV = "", ""          # resolved lazily below
+VAPID_SUB = "mailto:ipo-command-center@localhost"
+
+
+def vapid_keys():
+    global VAPID_PUB, VAPID_PRIV
+    if not VAPID_PUB:
+        VAPID_PUB, VAPID_PRIV = _vapid_keys()
+    return VAPID_PUB, VAPID_PRIV
+
+
+def send_push(title: str, body: str = "", url: str = "/"):
+    """Fire a push notification to every subscribed device. Never raises."""
+    try:
+        from pywebpush import webpush
+    except ImportError:
+        print("[push] pywebpush not installed — skipping", flush=True)
+        return
+    subs = rows("SELECT * FROM push_subs")
+    dead = []
+    for s in subs:
+        try:
+            webpush(subscription_info=json.loads(s["sub_json"]),
+                    data=json.dumps({"title": title, "body": body, "url": url}),
+                    vapid_private_key=vapid_keys()[1],
+                    vapid_claims={"sub": VAPID_SUB}, timeout=12)
+        except Exception as e:
+            print(f"[push] failed ({str(e)[:70]})", flush=True)
+            if "410" in str(e) or "404" in str(e):
+                dead.append(s["id"])
+    for i in dead:
+        run("DELETE FROM push_subs WHERE id=?", (i,))
+    if subs:
+        print(f"[push] sent to {len(subs) - len(dead)}/{len(subs)} devices: {title[:40]}", flush=True)
+
+# ----------------------------------------------------------------------------
+# helpers
+# ----------------------------------------------------------------------------
+
+def rows(sql, args=()):
+    with LOCK, get_db() as con:
+        cur = con.execute(sql, args)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def run(sql, args=()):
+    with LOCK, get_db() as con:
+        cur = con.execute(sql, args)
+        con.commit()
+        return cur.lastrowid
+
+
+def norm_name(s: str) -> str:
+    s = s.upper()
+    s = re.sub(r"\b(LIMITED|LTD|IPO|INDIA|IND)\b\.?", "", s)
+    s = re.sub(r"[^A-Z0-9]", "", s)
+    return s
+
+
+def today_str():
+    return ist_now().date().isoformat()
+
+
+def ipo_status(ipo: dict) -> str:
+    t = today_str()
+    od, cd, ld = ipo.get("open_date") or "", ipo.get("close_date") or "", ipo.get("listing_date") or ""
+    if ld and t >= ld:
+        return "listed"
+    if od and t < od:
+        return "upcoming"
+    if cd and od <= t <= cd:
+        return "open"
+    if cd and t > cd:
+        # closed — results are "out" once ANY applied account has a verdict;
+        # rows left pending are review-only (missing PAN/BO ID) and must not
+        # keep the whole IPO in RESULT AWAITED forever.
+        decided = rows("""SELECT COUNT(*) c FROM applications
+                          WHERE ipo_id=? AND applied=1 AND allotment IN ('allotted','not_allotted')""",
+                       (ipo["id"],))
+        return "allotment_done" if decided and decided[0]["c"] else "result_pending"
+    return "open" if od else "upcoming"
+
+
+REGISTRAR_LINKS = {
+    "Link Intime": "https://in.mpms.mufg.com/Initial_Offer/public-issues.html",
+    "KFin": "https://ipostatus.kfintech.com/",
+    "Bigshare": "https://ipo.bigshareonline.com/ipo_status.html",
+    "Other": "",
+}
+
+# ----------------------------------------------------------------------------
+# Registrar allotment engines (best-effort, graceful fallbacks)
+# ----------------------------------------------------------------------------
+
+_cache = {"bigshare_companies": (0, []), "kfin_companies": (0, []), "mufg_companies": (0, [])}
+
+# --- MUFG Intime (prev Link Intime) — verified 2026-08-14 ----------------------
+MUFG_BASE = "https://in.mpms.mufg.com/Initial_Offer/IPO.aspx/"
+
+# --- KFin (ipostatus.kfintech.com) — verified 2026-08-14 ----------------------
+KFIN_API = "https://0uz601ms56.execute-api.ap-south-1.amazonaws.com/prod/api/query?type="
+KFIN_FALLBACK = [{"id": "81387868980", "name": "MOLBIO DIAGNOSTICS LIMITED"},
+                 {"id": "94818267561", "name": "DHOOT TRANSMISSION LIMITED"}]
+
+
+def kfin_companies(force=False):
+    ts, comps = _cache["kfin_companies"]
+    if not force and comps and time.time() - ts < 1800:
+        return comps
+    # the SPA embeds its IPO dropdown as JSON inside its JS bundle
+    r = requests.get("https://ipostatus.kfintech.com/", headers=UA, timeout=15)
+    m = re.search(r'src="\.?(/static/js/main\.[0-9a-f]+\.js)"', r.text)
+    if not m:
+        raise ValueError("KFin bundle not found")
+    r = requests.get("https://ipostatus.kfintech.com" + m.group(1), headers=UA, timeout=30)
+    raw = None
+    for m in re.finditer(r"JSON\.parse\('((?:[^'\\]|\\.)*)'\)", r.text):
+        if "clientId" in m.group(1):
+            raw = m.group(1); break
+    if not raw:
+        raise ValueError("KFin company list not found in bundle")
+    data = json.loads(raw.encode().decode("unicode_escape"))
+    comps = [{"id": str(c["clientId"]), "name": c["name"]} for c in data]
+    merged = {c["id"]: c for c in (comps + KFIN_FALLBACK)}
+    out = list(merged.values())
+    _cache["kfin_companies"] = (time.time(), out)
+    print(f"[kfin] {len(out)} companies loaded", flush=True)
+    return out
+
+RESULT_TEMPLATES = {
+    "ok": "ok", "not_found": "not_found", "manual": "manual", "error": "error",
+}
+
+
+def bigshare_companies(force=False):
+    ts, comps = _cache["bigshare_companies"]
+    if not force and comps and time.time() - ts < 1800:
+        return comps
+    r = requests.get("https://ipo.bigshareonline.com/", headers=UA, timeout=15)
+    r.raise_for_status()
+    m = re.search(r'<select id="ddlCompany">(.*?)</select>', r.text, re.S)
+    comps = []
+    if m:
+        for val, name in re.findall(r'<option value="(\d+)">([^<]+)</option>', m.group(1)):
+            comps.append({"id": val, "name": name.strip()})
+    _cache["bigshare_companies"] = (time.time(), comps)
+    return comps
+
+
+def check_bigshare(ipo, acc):
+    """Return dict(status, allotted_qty, note, matched_company)."""
+    try:
+        comps = bigshare_companies()
+    except Exception as e:
+        return {"status": "manual", "note": f"Bigshare page unreachable ({e})", "link": REGISTRAR_LINKS["Bigshare"]}
+    target = norm_name(ipo["name"])
+    match = None
+    if ipo.get("registrar_ref"):
+        match = next((c for c in comps if c["id"] == str(ipo["registrar_ref"]).strip()), None)
+    if not match:
+        # exact-normalised then substring match
+        for c in comps:
+            if norm_name(c["name"]) == target:
+                match = c; break
+        if not match:
+            for c in comps:
+                n = norm_name(c["name"])
+                if target and (target in n or n in target):
+                    match = c; break
+    if not match:
+        return {"status": "manual", "note": "IPO not found in Bigshare live list (allotment not out yet, or different registrar?)",
+                "link": REGISTRAR_LINKS["Bigshare"]}
+
+    pan = (acc.get("pan") or "").strip().upper()
+    cdsl = (acc.get("cdsl") or "").strip()
+    if not pan and not cdsl:
+        return {"status": "manual", "note": "No PAN or CDSL BO ID stored for this account", "link": REGISTRAR_LINKS["Bigshare"]}
+
+    payload = {"Applicationno": (acc.get("app_no") or "").strip(),
+               "Company": match["id"],
+               "SelectionType": "PN" if pan else "BN",
+               "PanNo": pan,
+               "txtcsdl": cdsl, "txtDPID": "", "txtClId": "",
+               "ddlType": "", "lang": "en"}
+    try:
+        r = requests.post("https://ipo.bigshareonline.com/Data.aspx/FetchIpodetails",
+                          json=payload, timeout=20,
+                          headers={**UA, "Content-Type": "application/json; charset=utf-8",
+                                   "X-Requested-With": "XMLHttpRequest"})
+        r.raise_for_status()
+        d = r.json().get("d")
+    except Exception as e:
+        return {"status": "manual", "note": f"Bigshare API error ({e})", "link": REGISTRAR_LINKS["Bigshare"]}
+
+    if isinstance(d, str):
+        d = {"raw": d}
+    if not isinstance(d, dict):
+        return {"status": "manual", "note": "Unexpected Bigshare response", "link": REGISTRAR_LINKS["Bigshare"]}
+
+    blob = json.dumps(d)
+    if "No data found" in blob:
+        return {"status": "not_found", "note": f"No record for this PAN/BO ID at {match['name']} — usually means NOT allotted (confirm once)", "matched_company": match["name"]}
+
+    # try to dig out allotted shares count from known field names
+    qty = 0
+    for k, v in d.items():
+        kl = str(k).lower()
+        if any(w in kl for w in ("allot", "share", "qty", "quantity")):
+            nums = re.findall(r"\d+", str(v).replace(",", ""))
+            if nums:
+                qty = max(qty, max(int(x) for x in nums))
+    if qty > 0:
+        return {"status": "ok", "allotted_qty": qty, "note": f"Allotted {qty} shares", "matched_company": match["name"]}
+    # record exists but couldn't parse qty — treat as allotted if any identifying field came back
+    if any(str(v).strip() for v in d.values() if isinstance(v, str) and "not" not in str(v).lower()[:6]):
+        return {"status": "manual", "note": "Record found but shares unclear — verify once: " + blob[:160], "matched_company": match["name"], "link": REGISTRAR_LINKS["Bigshare"]}
+    return {"status": "not_found", "note": "Empty record — likely not allotted", "matched_company": match["name"]}
+
+
+def check_kfintech(ipo, acc):
+    """KFin's ipostatus site (React SPA) calls an open AWS API-Gateway:
+       GET .../api/query?type=pan|dpclid   headers: reqparam=<PAN|BOID>, client_id=<ipo id>
+       200 -> [{Appln_No, Name, DP_CLID, Pan_No, App_Shares, All_Shares}, ...]
+       404 -> {"error":"Record Not Found"}  (not allotted / not out yet)
+       The company->clientId map is embedded in the site's JS bundle; we scrape
+       and cache it, with a baked-in fallback for known IDs."""
+    pan = (acc.get("pan") or "").strip().upper()
+    cdsl = re.sub(r"\D", "", acc.get("cdsl") or "")
+    if not pan and not cdsl:
+        return {"status": "manual", "note": "No PAN or CDSL BO ID stored for this account",
+                "link": REGISTRAR_LINKS["KFin"]}
+    try:
+        comps = kfin_companies()
+    except Exception as e:
+        return {"status": "manual", "note": f"KFin site unreachable ({e})", "link": REGISTRAR_LINKS["KFin"]}
+
+    target = norm_name(ipo["name"])
+    match = None
+    if ipo.get("registrar_ref"):
+        match = next((c for c in comps if c["id"] == str(ipo["registrar_ref"]).strip()), None)
+    if not match:
+        for c in comps:
+            if norm_name(c["name"]) == target:
+                match = c; break
+        if not match:
+            for c in comps:
+                n = norm_name(c["name"])
+                if target and (target in n or n in target):
+                    match = c; break
+    if not match:
+        return {"status": "manual",
+                "note": "IPO not in KFin live list yet (allotment not published, or different registrar?)",
+                "link": REGISTRAR_LINKS["KFin"]}
+
+    if pan:
+        qtype, reqparam = "pan", pan
+    else:
+        if len(cdsl) != 16:
+            return {"status": "manual",
+                    "note": f"CDSL BO ID should be exactly 16 digits (stored value has {len(cdsl)}) — fix it in Accounts",
+                    "link": REGISTRAR_LINKS["KFin"]}
+        qtype, reqparam = "dpclid", cdsl
+    hdr = {**UA, "reqparam": reqparam, "client_id": str(match["id"]),
+           "Origin": "https://ipostatus.kfintech.com", "Referer": "https://ipostatus.kfintech.com/"}
+    r = None
+    for attempt in (1, 2):
+        try:
+            r = requests.get(KFIN_API + qtype, headers=hdr, timeout=15)
+            if r.status_code in (429, 500, 502, 503, 504) and attempt == 1:
+                time.sleep(2.5); continue
+            break
+        except requests.RequestException as e:
+            if attempt == 2:
+                return {"status": "manual", "note": f"KFin API error ({e})", "link": REGISTRAR_LINKS["KFin"]}
+            time.sleep(2.5)
+    if r is None:
+        return {"status": "manual", "note": "KFin API no response", "link": REGISTRAR_LINKS["KFin"]}
+
+    if r.status_code == 404:
+        # KFin shows All_Shares=0 records for genuine non-allotments, so a 404
+        # means "no application under this identifier" — needs human review
+        # (PAN typo, or the application never reached the registrar).
+        return {"status": "manual",
+                "note": f"KFin has NO record under this PAN/BO ID at {match['name']} — check the PAN/BO ID is typed right; if correct, verify the application in Groww",
+                "matched_company": match["name"], "link": REGISTRAR_LINKS["KFin"]}
+    if r.status_code != 200:
+        return {"status": "manual", "note": f"KFin API HTTP {r.status_code} — use one-click link",
+                "link": REGISTRAR_LINKS["KFin"]}
+    try:
+        data = r.json()
+    except ValueError:
+        return {"status": "manual", "note": "KFin returned non-JSON — verify: " + r.text[:140],
+                "link": REGISTRAR_LINKS["KFin"]}
+    if isinstance(data, dict):
+        # real payload: {"data": [ {All_Shares, App_Shares, Appln_No, ...}, ... ]}
+        data = data.get("data") if isinstance(data.get("data"), list) else [data]
+    if not isinstance(data, list) or not data:
+        return {"status": "not_found", "note": f"KFin: empty result — likely not allotted",
+                "matched_company": match["name"]}
+    qty = 0
+    applied = 0
+    for rec in data:
+        try:
+            qty += int(str(rec.get("All_Shares") or "0").replace(",", "") or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            applied += int(str(rec.get("App_Shares") or "0").replace(",", "") or 0)
+        except (TypeError, ValueError):
+            pass
+    if qty > 0:
+        return {"status": "ok", "allotted_qty": qty,
+                "note": f"KFin: ALLOTTED {qty} shares (applied {applied or '?'}, {len(data)} record(s))",
+                "matched_company": match["name"]}
+    return {"status": "not_found",
+            "note": f"KFin: applied {applied or '?'} shares, allotted 0 — NOT allotted ({match['name']})",
+            "matched_company": match["name"]}
+
+
+def mufg_companies(force=False):
+    ts, comps = _cache["mufg_companies"]
+    if not force and comps and time.time() - ts < 1800:
+        return comps
+    r = requests.post(MUFG_BASE + "GetDetails", json={}, headers=UA, timeout=20)
+    d = r.json().get("d", "")
+    rows = re.findall(r"<company_id>\s*(\d+)\s*</company_id>\s*<companyname>\s*([^<]+?)\s*</companyname>", d, re.I)
+    if not rows:
+        raise ValueError("MUFG company list empty")
+    comps = [{"id": i, "name": n.replace(" - IPO", "")} for i, n in rows]
+    _cache["mufg_companies"] = (time.time(), comps)
+    print(f"[mufg] {len(comps)} companies loaded", flush=True)
+    return comps
+
+
+def check_linkintime(ipo, acc):
+    """MUFG Intime (prev Link Intime) — new portal does NOT block servers.
+       Chain: POST GetDetails (company list) -> generateToken -> SearchOnPan
+       {clientid, PAN, IFSC:'', CHKVAL:'1', token} ; response d = XML rows with
+       <ALLOT> (allotted qty) and <SHARES> (applied). Empty dataset = no record."""
+    pan = (acc.get("pan") or "").strip().upper()
+    if not pan:
+        return {"status": "manual", "note": "MUFG auto-check needs PAN (only BO ID stored) — use one-click link",
+                "link": REGISTRAR_LINKS["Link Intime"]}
+    try:
+        comps = mufg_companies()
+    except Exception as e:
+        return {"status": "manual", "note": f"MUFG portal unreachable ({e})", "link": REGISTRAR_LINKS["Link Intime"]}
+    target = norm_name(ipo["name"])
+    match = None
+    if ipo.get("registrar_ref"):
+        match = next((c for c in comps if c["id"] == str(ipo["registrar_ref"]).strip()), None)
+    if not match:
+        for c in comps:
+            if norm_name(c["name"]) == target:
+                match = c; break
+        if not match:
+            for c in comps:
+                n = norm_name(c["name"])
+                if target and (target in n or n in target):
+                    match = c; break
+    if not match:
+        return {"status": "manual", "note": "IPO not in MUFG live list yet (allotment not published?)",
+                "link": REGISTRAR_LINKS["Link Intime"]}
+    try:
+        tok = requests.post(MUFG_BASE + "generateToken", json={}, headers=UA, timeout=15).json()["d"]
+        payload = {"clientid": match["id"], "PAN": pan, "IFSC": "", "CHKVAL": "1", "token": tok}
+        r = requests.post(MUFG_BASE + "SearchOnPan", data=json.dumps(payload),
+                          headers={**UA, "Content-Type": "application/json; charset=utf-8"}, timeout=20)
+        x = r.json().get("d", "")
+    except Exception as e:
+        return {"status": "manual", "note": f"MUFG API error ({e})", "link": REGISTRAR_LINKS["Link Intime"]}
+    rows_xml = re.findall(r"<Table>(.*?)</Table>", x, re.S)
+    if not rows_xml:
+        return {"status": "manual",
+                "note": f"MUFG has NO record under this PAN at {match['name']} — check PAN typed right; if correct, verify the application in Groww",
+                "matched_company": match["name"], "link": REGISTRAR_LINKS["Link Intime"]}
+    allot = sum(int(v) for row in rows_xml
+                for t, v in re.findall(r"<(ALLOT)>\s*(\d+)\s*</\1>", row))
+    applied = sum(int(v) for row in rows_xml
+                  for t, v in re.findall(r"<(SHARES)>\s*(\d+)\s*</\1>", row))
+    if allot > 0:
+        return {"status": "ok", "allotted_qty": allot,
+                "note": f"MUFG: ALLOTTED {allot} shares (applied {applied or '?'}, {len(rows_xml)} record(s))",
+                "matched_company": match["name"]}
+    return {"status": "not_found",
+            "note": f"MUFG: applied {applied or '?'} shares, allotted 0 — NOT allotted ({match['name']})",
+            "matched_company": match["name"]}
+
+
+ENGINES = {"Bigshare": check_bigshare, "KFin": check_kfintech, "Link Intime": check_linkintime}
+
+
+# ----------------------------------------------------------------------------
+# Live IPO list scraping (InvestorGain + Chittorgarh, best-effort merge)
+# ----------------------------------------------------------------------------
+
+MONTH_MAP = {m.lower(): i + 1 for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
+
+
+def _clean(x):
+    x = re.sub(r"<[^>]+>", " ", x)
+    x = x.replace("&#8377;", "₹").replace("&nbsp;", " ").replace("&amp;", "&")
+    return re.sub(r"\s+", " ", x).strip()
+
+
+def _mkdate(y, m, d):
+    try:
+        return date(int(y), int(m), int(d)).isoformat()
+    except ValueError:
+        return ""
+
+
+def _parse_issue_dates(txt):
+    """'11 to 13 Aug, 2026' -> (open, close)"""
+    m = re.search(r"(\d{1,2})\s*(?:to|-)\s*(\d{1,2})\s+([A-Za-z]{3})\w*[\s,]+(\d{4})", txt)
+    if not m:
+        m = re.search(r"(\d{1,2})\s+([A-Za-z]{3})\w*[\s,]+(\d{4})", txt)  # single day
+        if m:
+            d, mo, y = int(m.group(1)), MONTH_MAP.get(m.group(2)[:3].lower()), m.group(3)
+            return _mkdate(y, mo, d), _mkdate(y, mo, d)
+        return "", ""
+    d1, d2, mo, y = int(m.group(1)), int(m.group(2)), MONTH_MAP.get(m.group(3)[:3].lower()), m.group(4)
+    return _mkdate(y, mo, d1), _mkdate(y, mo, d2)
+
+
+def _parse_loose_date(txt):
+    """'Tue, Aug 18, 2026 ...' -> iso"""
+    m = re.search(r"([A-Za-z]{3})\w*[\s,]+(\d{1,2})[\s,]+(\d{4})", txt)
+    if not m:
+        return ""
+    return _mkdate(m.group(3), MONTH_MAP.get(m.group(1)[:3].lower()), int(m.group(2)))
+
+
+def _registrar_from(html):
+    low = html.lower()
+    if "linkintime" in low or "link intime" in low or "mufg" in low:
+        return "Link Intime"
+    if "kfintech" in low or "kfin technologies" in low or "karvy" in low:
+        return "KFin"
+    if "bigshare" in low:
+        return "Bigshare"
+    return "Other"
+
+
+def scrape_chittorgarh(max_detail=20):
+    """Mainboard IPO dashboard -> detail pages. Returns list of IPO dicts."""
+    r = requests.get("https://www.chittorgarh.com/ipo/", headers=UA, timeout=15)
+    r.raise_for_status()
+    out, seen = [], set()
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", r.text, re.S):
+        link = re.search(r'href="(/ipo/[a-z0-9\-]+/\d+/)"', tr)
+        if not link:
+            continue
+        cell = _clean(re.search(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S).group(1))
+        m = re.match(r"(.+?)\s*(?:\s+[A-Z]{1,3})?\s+(\d{1,2}\s*-\s*\d{1,2}\s+[A-Za-z]{3})\w*\s*$", cell)
+        name = m.group(1).strip() if m else re.sub(r"\s*\d.*$", "", cell).strip()
+        date_txt = m.group(2) if m else ""
+        if not name or link.group(1) in seen:
+            continue
+        seen.add(link.group(1))
+        out.append({"name": name, "dash_dates": date_txt,
+                    "url": "https://www.chittorgarh.com" + link.group(1)})
+        if len(out) >= max_detail:
+            break
+    # enrich from detail pages
+    for item in out:
+        try:
+            d = requests.get(item["url"], headers=UA, timeout=12).text
+            facts = {}
+            for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", d, re.S):
+                tds = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S)
+                if len(tds) >= 2:
+                    facts[_clean(tds[0])] = _clean(tds[1])
+            item["open_date"], item["close_date"] = _parse_issue_dates(facts.get("IPO Date", "") or item["dash_dates"])
+            item["listing_date"] = _parse_loose_date(facts.get("Listing Date", ""))
+            band = [float(x.replace(",", "")) for x in re.findall(r"\d[\d,]*(?:\.\d+)?", facts.get("Price Band", ""))]
+            item["price_min"], item["price_max"] = (min(band), max(band)) if band else (0, 0)
+            lotm = re.search(r"(\d[\d,]*)", facts.get("Lot Size", ""))
+            item["lot_size"] = int(lotm.group(1).replace(",", "")) if lotm else 0
+            item["registrar"] = _registrar_from(d)
+            item["gmp"] = 0.0  # GMP handled by ARTHAN market engine
+            # allotment date from the timetable row ("Tentative Allotment ... Mon, Aug 17, 2026")
+            am = (re.search(r'title="Tentative Allotment"[^<]*</a></span><span[^>]*>([^<]+)<', d, re.S)
+                  or re.search(r">Allotment</(?:a|span)></span><span[^>]*>([^<]+)<", d, re.S)
+                  or re.search(r"(?i)allotment[^<]*</t[dh]>\s*<td[^>]*>(.*?)</td>", d, re.S))
+            item["allotment_date"] = _parse_loose_date(am.group(1)) if am else ""
+        except Exception:
+            item.setdefault("open_date", ""); item.setdefault("close_date", "")
+            item.setdefault("registrar", "Other"); item.setdefault("gmp", 0.0)
+            item.setdefault("price_min", 0); item.setdefault("price_max", 0); item.setdefault("lot_size", 0)
+        # allotment date comes from the detail-page timetable; else blank (user-editable)
+        item.setdefault("allotment_date", "")
+        item["board"] = "Mainboard"
+    return out
+
+
+# ----------------------------------------------------------------------------
+# GMP auto-refresh (IPO Ji) + live prices (Yahoo Finance)
+# ----------------------------------------------------------------------------
+
+def scrape_gmp():
+    """IPO Ji GMP table -> [{name, board, gmp, gmp_pct, est_listing, price_min, price_max, status}]"""
+    r = requests.get("https://www.ipoji.com/ipo-gmp", headers=UA, timeout=18)
+    r.raise_for_status()
+    tbl = re.search(r"<table[^>]*>(.*?)</table>", r.text, re.S)
+    if not tbl:
+        return []
+    out = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", tbl.group(1), re.S):
+        cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c)).strip()
+                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S)]
+        if len(cells) < 7 or cells[0].strip().lower() == "ipo":
+            continue
+        raw, typ, band, gmp_cell = cells[0], cells[1], cells[2], cells[3]
+        # name like 'Milky Mist Dairy Food IPO Mainboard Open'
+        name = re.sub(r"\s*IPO\s*(Mainboard|BSE SME|NSE SME|SME)?\s*(Open|Closed|Upcoming|Allotment Out|Listed)?\s*$",
+                      "", raw, flags=re.I).strip()
+        name = re.sub(r"\s+IPO$", "", name, flags=re.I).strip()
+        gmp_m = re.search(r"([\-+]?)\s*₹?\s*(\d[\d,]*(?:\.\d+)?)", gmp_cell)
+        gmp = 0.0
+        if gmp_m and "—" not in gmp_cell:
+            gmp = float(gmp_m.group(2).replace(",", ""))
+            if gmp_m.group(1) == "-":
+                gmp = -gmp
+        nums = [float(x.replace(",", "")) for x in re.findall(r"\d[\d,]*(?:\.\d+)?", band)]
+        out.append({"name": name,
+                    "board": "SME" if "sme" in typ.lower() else "Mainboard",
+                    "gmp": gmp,
+                    "price_min": min(nums) if nums else 0,
+                    "price_max": max(nums) if nums else 0,
+                    "status": re.search(r"(Open|Closed|Upcoming|Listed|Allotment)", raw, re.I).group(1) if re.search(r"(Open|Closed|Upcoming|Listed|Allotment)", raw, re.I) else ""})
+    return out
+
+
+def _ipoji_subs():
+    """Consolidated live subscription board incl. sHNI/bHNI split."""
+    r = requests.get("https://www.ipoji.com/ipo-subscription-status",
+                     headers=UA, timeout=30)
+    r.raise_for_status()
+    recs = {}
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", r.text, re.S):
+        cells = [re.sub(r"<[^>]+>|\s+", " ", c).strip()
+                 for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)]
+        if len(cells) < 10:
+            continue
+        name = re.sub(r"\s{2,}", " ", re.sub(r"\b(NSE|BSE)\b", "", cells[0])).strip()
+        def f(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+        recs[norm_name(name)] = {"qib": f(cells[2]), "shni": f(cells[3]),
+                                 "bhni": f(cells[4]), "nii": f(cells[5]),
+                                 "rii": f(cells[6]), "emp": f(cells[7]),
+                                 "others": f(cells[8]), "total": f(cells[9])}
+    return recs
+
+
+def _chittorgarh_live_subs():
+    """Chittorgarh's own exchange-sourced live subscription, per open IPO.
+       Live table carries QIB / NII / Retail / Total (no HNI split)."""
+    r = requests.get("https://www.chittorgarh.com/ipo/", headers=UA, timeout=20,
+                     allow_redirects=True)
+    r.raise_for_status()
+    links = re.findall(r'href="(/ipo/([a-z0-9-]+)-ipo/(\d+))[^"]*"[^>]*>([^<]{4,60})<', r.text)
+    out = {}
+    sess = requests.Session()
+    sess.headers.update(UA)
+    for path, slug, iid, label in links[:18]:
+        try:
+            p = sess.get(f"https://www.chittorgarh.com/ipo_subscription/{slug}-ipo/{iid}/",
+                         timeout=20, allow_redirects=True)
+            for tbl in re.findall(r"<table[^>]*>(.*?)</table>", p.text, re.S):
+                if "Subscription (times)" not in tbl:
+                    continue
+                rec = {}
+                for row in re.findall(r"<tr[^>]*>(.*?)</tr>", tbl, re.S):
+                    cells = [re.sub(r"<[^>]+>|\s+", " ", c).strip()
+                             for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S)]
+                    if len(cells) < 2:
+                        continue
+                    key, val = cells[0].lower(), cells[1]
+                    try:
+                        num = float(re.sub(r"[^0-9.]", "", val) or "nan")
+                    except ValueError:
+                        continue
+                    if "qualified" in key:      rec["qib"] = num
+                    elif "non institutional" in key: rec["nii"] = num
+                    elif "retail" in key:       rec["rii"] = num
+                    elif "employee" in key:     rec["emp"] = num
+                    elif "total" in key:        rec["total"] = num
+                if rec:
+                    lab = re.sub(r"\s*\(BSE\)|\s*\(NSE\)|\s*IPO\s*$", "", label, flags=re.I)
+                    out[norm_name(lab)] = rec
+                break
+        except Exception:
+            continue
+    return out
+
+
+def refresh_subscriptions():
+    """Merge feeds every 15 min: Chittorgarh (exchange-sourced) wins for
+       QIB/NII/Retail/Total; IPO Ji supplies the sHNI/bHNI split + finals."""
+    ipos_local = rows("SELECT id, name, sub_json FROM ipos")
+    if not ipos_local:
+        return {"ok": True, "matched": 0}
+    iji = {}
+    cg = {}
+    errors = []
+    try:
+        iji = _ipoji_subs()
+    except Exception as e:
+        errors.append(f"ipoji: {e}")
+    try:
+        cg = _chittorgarh_live_subs()
+    except Exception as e:
+        errors.append(f"chittorgarh: {e}")
+    matched = 0
+    now = ist_now().isoformat(timespec="seconds")
+    for ipo in ipos_local:
+        t = norm_name(ipo["name"])
+        def find(pool):
+            hit = pool.get(t)
+            if hit:
+                return hit
+            return next((v for k, v in pool.items() if t and (t in k or k in t)), None)
+        rec_ij = find(iji) or {}
+        rec_cg = find(cg) or {}
+        if not rec_ij and not rec_cg:
+            continue
+        merged = {"qib": None, "shni": None, "bhni": None, "nii": None,
+                  "rii": None, "emp": None, "others": None, "total": None,
+                  "src": ("cg+iji" if rec_cg and rec_ij else "cg" if rec_cg else "iji")}
+        for k in ("shni", "bhni", "emp", "others"):
+            merged[k] = rec_ij.get(k)
+        merged["total"] = rec_ij.get("total")   # IPOJi total = base
+        for k in ("qib", "nii", "rii", "total"):
+            if rec_cg.get(k) is not None:
+                merged[k] = rec_cg[k]           # Chittorgarh wins when live
+            elif rec_ij.get(k) is not None:
+                merged[k] = rec_ij[k]
+        payload = json.dumps(merged)
+        if payload != (ipo.get("sub_json") or ""):
+            run("UPDATE ipos SET sub_json=?, sub_at=? WHERE id=?", (payload, now, ipo["id"]))
+            schedule_backup()
+        matched += 1
+    print(f"[sub] matched {matched}/{len(ipos_local)} (cg:{len(cg)} iji:{len(iji)})", flush=True)
+    return {"ok": True, "matched": matched, "chittorgarh": len(cg), "ipoji": len(iji), "errors": errors}
+
+
+def refresh_gmp():
+    """Update gmp for tracked IPOs. Returns {'matched':n,'total':n}."""
+    try:
+        scraped = scrape_gmp()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    scraped = [s for s in scraped if s["board"] == "Mainboard" and s["name"]]
+    matched = 0
+    for ipo in rows("SELECT id,name,gmp,listing_date FROM ipos"):
+        if ipo.get("listing_date") and today_str() > ipo["listing_date"]:
+            continue  # already listed — GMP irrelevant
+        tgt = norm_name(ipo["name"])
+        hit = None
+        for s in scraped:
+            ns = norm_name(s["name"])
+            if ns == tgt or (len(tgt) > 5 and (tgt in ns or ns in tgt)):
+                hit = s; break
+        if hit:
+            # IPOJi value lands in gmp_feed (cross-check store). The displayed
+            # ipos.gmp is owned by the ARTHAN engine whenever it manages the IPO
+            # (single flicker-free number); otherwise the legacy feed writes it.
+            run("""UPDATE ipos SET gmp_feed=?,
+                   gmp=CASE WHEN mkt_json='' THEN ? ELSE gmp END WHERE id=?""",
+                (hit["gmp"], hit["gmp"], ipo["id"]))
+            matched += 1
+    return {"ok": True, "matched": matched, "total": len(scraped)}
+
+
+def yahoo_price(symbol):
+    r = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.NS"
+                     if not symbol.endswith((".NS", ".BO")) else
+                     f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+                     headers=UA, timeout=10)
+    r.raise_for_status()
+    meta = r.json()["chart"]["result"][0]["meta"]
+    return float(meta.get("regularMarketPrice") or 0), meta.get("symbol", symbol)
+
+
+def resolve_symbol(name):
+    """Best-effort: find NSE symbol from company name via Yahoo search."""
+    q = re.sub(r"\b(limited|ltd|india)\b", "", name, flags=re.I).strip()
+    try:
+        r = requests.get("https://query1.finance.yahoo.com/v1/finance/search",
+                         params={"q": q, "quotesCount": 6, "newsCount": 0, "enableFuzzyQuery": True},
+                         headers=UA, timeout=10)
+        r.raise_for_status()
+        cands = [x for x in r.json().get("quotes", []) if str(x.get("symbol", "")).endswith(".NS")]
+        tgt = norm_name(name)
+        for c in cands:
+            cn = norm_name(c.get("shortname") or c.get("longname") or c.get("symbol", ""))
+            if cn == tgt or (tgt and (tgt in cn or cn in tgt)):
+                return c["symbol"].replace(".NS", "")
+        return cands[0]["symbol"].replace(".NS", "") if cands else ""
+    except Exception:
+        return ""
+
+
+def fetch_cmp_for(ipo):
+    """Resolve symbol if needed, fetch CMP, persist. Returns (cmp, symbol, err)."""
+    sym = (ipo.get("symbol") or "").strip()
+    if not sym:
+        sym = resolve_symbol(ipo["name"])
+        if sym:
+            run("UPDATE ipos SET symbol=? WHERE id=?", (sym, ipo["id"]))
+    if not sym:
+        return 0, "", "could not resolve NSE symbol — set it manually in Edit IPO"
+    try:
+        price, _ = yahoo_price(sym)
+    except Exception as e:
+        return 0, sym, str(e)
+    if price:
+        run("UPDATE ipos SET cmp=?, cmp_at=datetime('now') WHERE id=?", (price, ipo["id"]))
+    return price, sym, ""
+
+
+def refresh_listing_cmps():
+    """Auto-refresh CMP for IPOs listed today or recently (keeps P&L live)."""
+    t = today_str()
+    due = rows("""SELECT * FROM ipos WHERE listing_date<>'' AND listing_date<=?
+                  AND date(listing_date)>=date(?, '-14 day')""", (t, t))
+    out = []
+    for ipo in due:
+        cmp_, sym, err = fetch_cmp_for(ipo)
+        if cmp_:
+            out.append({"name": ipo["name"], "cmp": cmp_, "symbol": sym})
+    return out
+
+
+_alert_seen = set()
+
+
+def compute_alerts():
+    t = today_str()
+    alerts = []
+    ipos = rows("SELECT * FROM ipos")
+    apps = rows("""SELECT a.*, ac.holder, ac.auth_mode FROM applications a
+                   JOIN accounts ac ON ac.id=a.account_id WHERE a.applied=1""")
+    nm = {i["id"]: i for i in ipos}
+    for a in apps:
+        ipo = nm.get(a["ipo_id"])
+        if not ipo:
+            continue
+        in_window = (ipo.get("open_date") or "9999") <= t <= (ipo.get("close_date") or "")
+        if a["mandate_status"] == "pending" and in_window:
+            alerts.append({"sev": "high", "kind": "mandate", "ipo_id": ipo["id"],
+                           "title": "UPI mandate pending",
+                           "detail": f"{a['holder']} — {ipo['name']} • ₹{a['amount']:,.0f}"})
+        if a["allotment"] == "not_allotted" and a["refund"] == "pending":
+            alerts.append({"sev": "med", "kind": "refund", "ipo_id": ipo["id"],
+                           "title": "Refund/unblock pending",
+                           "detail": f"{a['holder']} — {ipo['name']} • ₹{a['amount']:,.0f}"})
+    for ipo in ipos:
+        st = ipo_status(ipo)
+        if ipo.get("allotment_date") and ipo["allotment_date"] <= t and st == "result_pending":
+            pending_n = sum(1 for a in apps if a["ipo_id"] == ipo["id"] and a["allotment"] == "pending")
+            if pending_n:
+                alerts.append({"sev": "high", "kind": "allotment", "ipo_id": ipo["id"],
+                               "title": f"Allotment check due: {ipo['name']}",
+                               "detail": f"{pending_n} application(s) still pending — run auto-check ({ipo['registrar']})"})
+        if ipo.get("listing_date") == t:
+            open_pos = [a for a in apps if a["ipo_id"] == ipo["id"] and a["allotment"] == "allotted"
+                        and (a["allotted_qty"] or 0) > (a["sell_qty"] or 0)]
+            alerts.append({"sev": "high", "kind": "listing", "ipo_id": ipo["id"],
+                           "title": f"🔔 {ipo['name']} lists today",
+                           "detail": f"CMP ₹{ipo['cmp'] or '?'}" +
+                                     (f" • open positions in {len(open_pos)} account(s)" if open_pos else "")})
+            tpin = sorted({a["holder"] for a in open_pos if (a.get("auth_mode") or "") == "TPIN"})
+            if tpin:
+                alerts.append({"sev": "high", "kind": "tpin", "ipo_id": ipo["id"],
+                               "title": "CDSL TPIN authorization needed to sell today",
+                               "detail": f"{ipo['name']}: {', '.join(tpin)}"})
+        # listing tomorrow → prep hint for GMP vs allocation
+        if ipo.get("listing_date") and ipo["listing_date"] > t:
+            delta = (date.fromisoformat(ipo["listing_date"]) - date.fromisoformat(t)).days
+            if delta == 1:
+                alerts.append({"sev": "info", "kind": "listing_soon", "ipo_id": ipo["id"],
+                               "title": f"{ipo['name']} lists tomorrow",
+                               "detail": f"GMP ₹{ipo['gmp'] or 0} • ensure DDPI/TPIN ready on allotted accounts"})
+    # data-quality findings from the ARTHAN market engine (last 24 h only, newest 6)
+    try:
+        cutoff = (ist_now() - timedelta(hours=24)).isoformat(timespec="seconds")
+        issues = [x for x in json.loads(kv_get("market_issues", "[]") or "[]")
+                  if x.get("at", "") >= cutoff][-6:]
+        for x in issues:
+            alerts.append({"sev": x.get("sev", "med"), "kind": "data_check",
+                           "title": x["title"], "detail": x["detail"]})
+    except Exception:
+        pass
+    return alerts
+
+
+def sync_live_ipos():
+    """Merge scraped IPOs into DB by fuzzy name. Returns summary dict."""
+    summary = {"fetched": 0, "added": 0, "updated": 0, "errors": []}
+    scraped = []
+    try:
+        scraped = scrape_chittorgarh()
+        summary["fetched"] = len(scraped)
+    except Exception as e:
+        summary["errors"].append(f"Chittorgarh: {e}")
+    existing = rows("SELECT * FROM ipos")
+    for s in scraped:
+        tgt = norm_name(s["name"])
+        if not tgt:
+            continue
+        hit = None
+        for e in existing:
+            ne = norm_name(e["name"])
+            if ne == tgt or (len(tgt) > 6 and (tgt in ne or ne in tgt)):
+                hit = e; break
+        if hit:
+            # keep live data fresh: dates/price/lot can shift (postponements,
+            # price-band fixes) — refresh changed fields until the IPO lists;
+            # never touch an already-listed IPO's history
+            upd = {}
+            STATUS_FROZEN = ipo_status(hit) == "listed"
+            for f in ("open_date", "close_date", "allotment_date", "listing_date",
+                      "price_min", "price_max", "lot_size"):
+                nv = s.get(f)
+                if not nv:
+                    continue
+                if not hit.get(f):
+                    upd[f] = nv                        # fill empties as before
+                elif not STATUS_FROZEN and str(nv) != str(hit.get(f) or ""):
+                    upd[f] = nv                        # correct stale values
+            if s.get("gmp"):
+                upd["gmp"] = s["gmp"]
+            if hit.get("registrar") in ("Other", "") and s.get("registrar") not in ("Other", ""):
+                upd["registrar"] = s["registrar"]
+            if upd:
+                sets = ",".join(f"{k}=?" for k in upd)
+                run(f"UPDATE ipos SET {sets} WHERE id=?", (*upd.values(), hit["id"]))
+                summary["updated"] += 1
+        else:
+            run("""INSERT INTO ipos(name,registrar,open_date,close_date,price_min,price_max,
+                   lot_size,allotment_date,listing_date,board,gmp,source)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,'live')""",
+                (s["name"], s.get("registrar", "Other"), s.get("open_date", ""), s.get("close_date", ""),
+                 s.get("price_min", 0), s.get("price_max", 0), s.get("lot_size", 0),
+                 s.get("allotment_date", ""), s.get("listing_date", ""), "Mainboard", s.get("gmp", 0)))
+            summary["added"] += 1
+    return summary
+
+
+# ----------------------------------------------------------------------------
+# FastAPI app
+# ----------------------------------------------------------------------------
+
+app = FastAPI(title="IPO Command Center")
+app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+
+
+# ----------------------------------------------------------------------------
+# simple passcode gate (protects PAN/account data on the public tunnel)
+# ----------------------------------------------------------------------------
+
+CONF_FILE = DATA / "config.json"
+if CONF_FILE.exists():
+    CONF = json.loads(CONF_FILE.read_text())
+else:
+    CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}
+    print("[boot] FIRST-RUN PASSCODE (check Logs, or set PASSCODE env var):", CONF["passcode"], flush=True)
+    try:
+        CONF_FILE.write_text(json.dumps(CONF))
+    except Exception:
+        pass  # ephemeral filesystems (e.g. Render free) — env/default still work
+
+_PASSCODE = os.environ.get("PASSCODE", CONF["passcode"]).strip()
+_AUTH_TOKEN = hashlib.sha256((_PASSCODE + "-ipo-center").encode()).hexdigest()[:48]
+
+UNLOCK_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>IPO Center — Unlock</title>
+<style>body{background:#0b1220;color:#e6ecf5;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.box{background:#121b2e;border:1px solid #243150;border-radius:16px;padding:32px 28px;text-align:center;max-width:340px;width:90%}
+input{background:#0e1730;border:1px solid #243150;color:#e6ecf5;border-radius:10px;padding:12px;font-size:18px;width:100%;text-align:center;letter-spacing:6px;margin:14px 0;box-sizing:border-box}
+button{background:#4f8cff;border:none;color:#fff;border-radius:10px;padding:12px;width:100%;font-size:15px;font-weight:600;cursor:pointer}
+.err{color:#ef4444;font-size:12.5px;min-height:18px;margin-top:10px}</style></head><body>
+<div class="box"><div style="font-size:38px">🔒</div><h2 style="font-size:17px;margin:10px 0 4px">IPO Command Center</h2>
+<p style="color:#8b9bb5;font-size:13px">Enter your 6-digit passcode</p>
+<input id="c" inputmode="numeric" maxlength="6" autocomplete="off" autofocus>
+<button onclick="go()">Unlock</button><div class="err" id="e"></div></div>
+<script>
+const go=async()=>{const r=await fetch('/api/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:document.getElementById('c').value})});
+if(r.ok)location.href='/';else{let m='Wrong passcode — try again';try{const j=await r.json();if(j.detail)m=j.detail;}catch(_){}document.getElementById('e').textContent=m;}};
+document.getElementById('c').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+</script></body></html>"""
+
+PUBLIC_PATHS = {"/manifest.json", "/sw.js", "/favicon.ico", "/api/unlock", "/healthz"}
+
+
+def _authed(req) -> bool:
+    return secrets.compare_digest(req.cookies.get("ipo_auth") or "", _AUTH_TOKEN)
+
+
+@app.middleware("http")
+async def passcode_gate(request, call_next):
+    p = request.url.path
+    if p in PUBLIC_PATHS or p.startswith("/static"):
+        return await call_next(request)
+    if p == "/" or p.startswith("/api"):
+        if _authed(request):
+            resp = await call_next(request)
+            if (request.method in ("POST", "PUT", "DELETE") and resp.status_code < 400
+                    and p not in ("/api/unlock", "/api/backup")):
+                try:
+                    schedule_backup()
+                except Exception:
+                    pass
+            return resp
+        if p.startswith("/api"):
+            return JSONResponse({"ok": False, "error": "locked"}, status_code=401)
+        return HTMLResponse(UNLOCK_HTML)
+    return await call_next(request)
+
+
+# --- unlock rate limiting: 5 wrong tries -> locked for 5 minutes (per IP),
+#     plus a global brake (40 wrong tries in 10 min from anywhere -> 5-min global
+#     lock) so rotating IPs can't brute force the passcode either ---
+_unlock_fails = {}   # ip -> [timestamps of recent wrong attempts]
+_unlock_until = {}   # ip -> locked-until epoch
+_global_fails = []   # all wrong attempts, rolling
+_global_until = 0.0
+
+
+def _client_ip(request):
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+@app.post("/api/unlock")
+def unlock(request: Request, b: dict = Body(...)):
+    global _global_until
+    ip = _client_ip(request)
+    now = time.time()
+    if now < _global_until:
+        mins = max(1, int((_global_until - now + 59) // 60))
+        raise HTTPException(429, f"Service temporarily locked — try again in {mins} min.")
+    until = _unlock_until.get(ip, 0)
+    if now < until:
+        mins = max(1, int((until - now + 59) // 60))
+        raise HTTPException(429, f"Too many wrong attempts — locked. Try again in {mins} min.")
+    if not secrets.compare_digest(str(b.get("code", "")).strip(), _PASSCODE):
+        _global_fails.append(now)
+        _global_fails[:] = [t for t in _global_fails if now - t < 600]
+        if len(_global_fails) >= 40:
+            _global_until = now + 300
+            _global_fails.clear()
+            raise HTTPException(429, "Service temporarily locked for 5 minutes")
+        fails = [t for t in _unlock_fails.get(ip, []) if now - t < 600]
+        fails.append(now)
+        _unlock_fails[ip] = fails
+        if len(fails) >= 5:
+            _unlock_until[ip] = now + 300
+            _unlock_fails.pop(ip, None)
+            raise HTTPException(429, "Too many wrong attempts — LOCKED for 5 minutes")
+        raise HTTPException(401, f"Wrong passcode — {5 - len(fails)} tries left before a 5-min lock")
+    # success: clear counters
+    _unlock_fails.pop(ip, None)
+    _unlock_until.pop(ip, None)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie("ipo_auth", _AUTH_TOKEN, max_age=30 * 86400,
+                    httponly=True, samesite="lax",
+                    secure=(request.url.scheme == "https"))
+    return resp
+
+
+@app.get("/healthz")
+def healthz():
+    # public, ultra-light — used by uptime monitors to keep the free host awake
+    return {"ok": True, "time": ist_now().isoformat(timespec="seconds")}
+
+
+@app.get("/api/backup")
+def backup_download():
+    payload = export_backup()
+    fname = "ipo-backup-" + ist_now().strftime("%Y%m%d-%H%M") + ".json"
+    return JSONResponse(payload, headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@app.get("/api/push/vapid")
+def push_vapid():
+    return {"ok": True, "key": vapid_keys()[0]}
+
+
+@app.post("/api/push/subscribe")
+def push_subscribe(b: dict = Body(...)):
+    sub = b.get("subscription") or {}
+    ep = sub.get("endpoint") or ""
+    if not ep:
+        raise HTTPException(400, "subscription.endpoint missing")
+    run("""INSERT INTO push_subs(endpoint, sub_json) VALUES(?,?)
+           ON CONFLICT(endpoint) DO UPDATE SET sub_json=excluded.sub_json""",
+        (ep, json.dumps(sub)))
+    schedule_backup()
+    return {"ok": True}
+
+
+@app.delete("/api/push/subscribe")
+def push_unsubscribe(b: dict = Body(...)):
+    ep = ((b or {}).get("endpoint") or "")
+    if ep:
+        run("DELETE FROM push_subs WHERE endpoint=?", (ep,))
+    return {"ok": True}
+
+
+@app.post("/api/push/test")
+def push_test():
+    subs = rows("SELECT COUNT(*) c FROM push_subs")[0]["c"]
+    if not subs:
+        raise HTTPException(400, "no subscribed devices — tap 'Enable phone alerts' on your phone first")
+    send_push("🔔 IPO Center", "Notifications are ON — you'll get allotment & mandate alerts here.")
+    return {"ok": True, "devices": subs}
+
+
+@app.post("/api/backup")
+def backup_restore(b: dict = Body(...)):
+    try:
+        counts = restore_backup(b)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(400, f"restore failed: {e}")
+    schedule_backup()
+    return {"ok": True, "counts": counts}
+
+
+@app.get("/manifest.json")
+def manifest():
+    return Response((BASE / "static" / "manifest.json").read_text(encoding="utf-8"),
+                    media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+def service_worker():
+    return Response((BASE / "static" / "sw.js").read_text(encoding="utf-8"),
+                    media_type="text/javascript",
+                    headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return (BASE / "static" / "index.html").read_text(encoding="utf-8")
+
+
+_qr_cache = {"url": "", "b64": ""}
+
+
+def mobile_info():
+    """Current public tunnel URL + QR (data-URI), regenerated when URL changes."""
+    try:
+        url = (DATA / "public-url.txt").read_text().strip()
+    except Exception:
+        url = ""
+    if not url:
+        return {"url": "", "qr": ""}
+    if _qr_cache["url"] != url:
+        try:
+            import base64, io, segno
+            buf = io.BytesIO()
+            segno.make(url).save(buf, kind="png", scale=4, dark="#0b1220", light="white", border=3)
+            _qr_cache.update(url=url, b64="data:image/png;base64," + base64.b64encode(buf.getvalue()).decode())
+        except Exception:
+            _qr_cache.update(url=url, b64="")
+    return {"url": url, "qr": _qr_cache["b64"]}
+
+
+@app.get("/api/state")
+def state():
+    ipos = rows("SELECT * FROM ipos ORDER BY COALESCE(NULLIF(open_date,''),'9999') ASC, id DESC")
+    for i in ipos:
+        i["status"] = ipo_status(i)
+        agg = rows("""SELECT COUNT(*) applied_cnt,
+                             SUM(CASE WHEN mandate_status='approved' THEN amount ELSE 0 END) blocked_amd,
+                             SUM(CASE WHEN allotment='allotted' THEN allotted_qty ELSE 0 END) allotted_qty,
+                             SUM(CASE WHEN allotment='allotted' THEN amount ELSE 0 END) invested
+                      FROM applications WHERE ipo_id=? AND applied=1""", (i["id"],))[0]
+        i["applied_cnt"] = agg["applied_cnt"] or 0
+        i["blocked_amt"] = agg["blocked_amd"] or 0
+        i["allotted_qty"] = agg["allotted_qty"] or 0
+        i["invested"] = agg["invested"] or 0
+        i["registrar_link"] = REGISTRAR_LINKS.get(i["registrar"], "")
+        try:
+            i["sub"] = json.loads(i["sub_json"]) if i.get("sub_json") else None
+        except (TypeError, ValueError):
+            i["sub"] = None
+        try:
+            i["mkt"] = json.loads(i["mkt_json"]) if i.get("mkt_json") else None
+        except (TypeError, ValueError):
+            i["mkt"] = None
+    return {
+        "accounts": rows("SELECT * FROM accounts ORDER BY holder"),
+        "ipos": ipos,
+        "applications": rows("SELECT * FROM applications"),
+        "today": today_str(),
+        "mobile": mobile_info(),
+    }
+
+
+# ---- accounts ----
+@app.post("/api/accounts")
+def create_account(b: dict = Body(...)):
+    holder = (b.get("holder") or "").strip()
+    if not holder:
+        raise HTTPException(400, "holder name required")
+    pan = (b.get("pan") or "").strip().upper()
+    if pan and not re.fullmatch(r"[A-Z]{5}\d{4}[A-Z]", pan):
+        raise HTTPException(400, "PAN format looks wrong (ABCDE1234F)")
+    cdsl = (b.get("cdsl") or "").strip()
+    if cdsl and not re.fullmatch(r"\d{16}", cdsl):
+        raise HTTPException(400, "CDSL BO ID must be 16 digits")
+    aid = run("INSERT INTO accounts(holder,pan,cdsl,broker,bank,upi,auth_mode,notes,active) VALUES(?,?,?,?,?,?,?,?,?)",
+              (holder, pan, cdsl, b.get("broker", ""), b.get("bank", ""), b.get("upi", ""),
+               b.get("auth_mode", ""), b.get("notes", ""), 1 if b.get("active", True) else 0))
+    return {"ok": True, "id": aid}
+
+
+@app.put("/api/accounts/{aid}")
+def update_account(aid: int, b: dict = Body(...)):
+    pan = (b.get("pan") or "").strip().upper()
+    cdsl = (b.get("cdsl") or "").strip()
+    if pan and not re.fullmatch(r"[A-Z]{5}\d{4}[A-Z]", pan):
+        raise HTTPException(400, "PAN format looks wrong")
+    if cdsl and not re.fullmatch(r"\d{16}", cdsl):
+        raise HTTPException(400, "CDSL BO ID must be 16 digits")
+    run("""UPDATE accounts SET holder=?,pan=?,cdsl=?,broker=?,bank=?,upi=?,auth_mode=?,notes=?,active=? WHERE id=?""",
+        (b.get("holder", "").strip(), pan, cdsl, b.get("broker", ""), b.get("bank", ""),
+         b.get("upi", ""), b.get("auth_mode", ""), b.get("notes", ""), 1 if b.get("active", True) else 0, aid))
+    return {"ok": True}
+
+
+@app.delete("/api/accounts/{aid}")
+def delete_account(aid: int):
+    run("DELETE FROM accounts WHERE id=?", (aid,))
+    return {"ok": True}
+
+
+# ---- ipos ----
+@app.post("/api/ipos")
+def create_ipo(b: dict = Body(...)):
+    name = (b.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "IPO name required")
+    iid = run("""INSERT INTO ipos(name,registrar,registrar_ref,open_date,close_date,price_min,price_max,
+                 lot_size,allotment_date,listing_date,board,symbol,cmp,gmp,source,notes)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'manual',?)""",
+              (name, b.get("registrar", "Other"), b.get("registrar_ref", ""), b.get("open_date", ""),
+               b.get("close_date", ""), float(b.get("price_min") or 0), float(b.get("price_max") or 0),
+               int(b.get("lot_size") or 0), b.get("allotment_date", ""), b.get("listing_date", ""),
+               b.get("board", "Mainboard"), b.get("symbol", ""), float(b.get("cmp") or 0),
+               float(b.get("gmp") or 0), b.get("notes", "")))
+    return {"ok": True, "id": iid}
+
+
+@app.put("/api/ipos/{iid}")
+def update_ipo(iid: int, b: dict = Body(...)):
+    run("""UPDATE ipos SET name=?,registrar=?,registrar_ref=?,open_date=?,close_date=?,price_min=?,price_max=?,
+           lot_size=?,allotment_date=?,listing_date=?,board=?,symbol=?,cmp=?,gmp=?,notes=? WHERE id=?""",
+        (b.get("name", "").strip(), b.get("registrar", "Other"), b.get("registrar_ref", ""),
+         b.get("open_date", ""), b.get("close_date", ""), float(b.get("price_min") or 0),
+         float(b.get("price_max") or 0), int(b.get("lot_size") or 0), b.get("allotment_date", ""),
+         b.get("listing_date", ""), b.get("board", "Mainboard"), b.get("symbol", ""),
+         float(b.get("cmp") or 0), float(b.get("gmp") or 0), b.get("notes", ""), iid))
+    return {"ok": True}
+
+
+@app.delete("/api/ipos/{iid}")
+def delete_ipo(iid: int):
+    run("DELETE FROM ipos WHERE id=?", (iid,))
+    return {"ok": True}
+
+
+@app.post("/api/ipos/sync_live")
+def api_sync_live():
+    try:
+        out = {"ok": True, **sync_live_ipos()}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, 500)
+    threading.Thread(target=arthan.refresh_market, daemon=True).start()
+    return out
+
+
+# ---- applications ----
+def upsert_app(ipo_id, acc_id, fields: dict, auto_amount=True):
+    ex = rows("SELECT * FROM applications WHERE ipo_id=? AND account_id=?", (ipo_id, acc_id))
+    acct = rows("SELECT * FROM accounts WHERE id=?", (acc_id,))
+    ipo = rows("SELECT * FROM ipos WHERE id=?", (ipo_id,))
+    if not ipo:
+        raise HTTPException(404, "ipo not found")
+    ipo = ipo[0]
+    base = ex[0] if ex else {}
+    merged = {**base, **{k: v for k, v in fields.items() if v is not None}}
+
+    # auto-fill UPI from account default
+    if not merged.get("upi") and acct:
+        merged["upi"] = acct[0].get("upi", "")
+    # auto amount from lots * lot_size * upper band
+    if auto_amount and merged.get("lots") and ipo.get("lot_size") and ipo.get("price_max"):
+        merged["amount"] = round(int(merged["lots"]) * ipo["lot_size"] * ipo["price_max"], 2)
+    # sensible refund defaults
+    if merged.get("allotment") == "allotted":
+        merged["refund"] = "na"
+    elif merged.get("allotment") == "not_allotted" and merged.get("refund") in ("na", "", None):
+        merged["refund"] = "pending"
+
+    if ex:
+        sets = ",".join(f"{k}=?" for k in merged if k != "id")
+        vals = [merged[k] for k in merged if k != "id"]
+        run(f"UPDATE applications SET {sets}, updated_at=datetime('now','localtime') WHERE id=?", (*vals, ex[0]["id"]))
+        return ex[0]["id"]
+    cols = ["ipo_id", "account_id"] + [k for k in merged if k not in ("id", "ipo_id", "account_id")]
+    vals = [ipo_id, acc_id] + [merged[k] for k in cols[2:]]
+    return run(f"INSERT INTO applications({','.join(cols)}) VALUES({','.join('?'*len(cols))})", vals)
+
+
+@app.post("/api/applications")
+def save_application(b: dict = Body(...)):
+    ipo_id = int(b.get("ipo_id")); acc_id = int(b.get("account_id"))
+    fields = {k: b.get(k) for k in ("applied", "app_no", "lots", "category", "amount", "upi",
+                                    "mandate_status", "allotment", "allotted_qty", "refund",
+                                    "sell_qty", "sell_price", "sold_on", "checked_note") if k in b}
+    aid = upsert_app(ipo_id, acc_id, fields, auto_amount=("amount" not in b))
+    # UPI rotation: the per-application ("used") UPI is stored on this row only.
+    # The account's DEFAULT UPI never changes from here — edit it in Accounts.
+    return {"ok": True, "id": aid}
+
+
+@app.post("/api/ipos/{iid}/mandates")
+def set_all_mandates(iid: int, b: dict = Body(...)):
+    status = b.get("status", "approved")
+    if status not in ("pending", "approved", "rejected", "expired"):
+        raise HTTPException(400, "bad status")
+    with LOCK, get_db() as con:
+        cur = con.execute("UPDATE applications SET mandate_status=?, updated_at=datetime('now','localtime') WHERE ipo_id=? AND applied=1", (status, iid))
+        con.commit()
+        n = cur.rowcount
+    return {"ok": True, "updated": n}
+
+
+@app.post("/api/ipos/{iid}/apply")
+def apply_bulk(iid: int, b: dict = Body(...)):
+    accs = rows("SELECT * FROM accounts WHERE active=1")
+    ids = b.get("account_ids") or [a["id"] for a in accs]
+    lots = int(b.get("lots") or 1)
+    n = 0
+    for a in accs:
+        if a["id"] not in ids:
+            continue
+        upsert_app(iid, a["id"], {"applied": 1, "lots": lots,
+                                  "category": b.get("category", "Retail"),
+                                  "upi": a.get("upi", "")})
+        n += 1
+    return {"ok": True, "applied": n}
+
+
+def run_allotment_checks(ipo: dict) -> list:
+    """Sweep every applied account through the registrar engine, commit verdicts,
+       and return per-account result dicts."""
+    engine = ENGINES.get(ipo["registrar"])
+    apps = rows("""SELECT a.*, ac.holder, ac.pan, ac.cdsl FROM applications a
+                   JOIN accounts ac ON ac.id=a.account_id
+                   WHERE a.ipo_id=? AND a.applied=1""", (ipo["id"],))
+    results = []
+    for a in apps:
+        if engine is None:
+            res = {"status": "manual", "note": "Unknown registrar — check manually", "link": REGISTRAR_LINKS.get(ipo["registrar"], "")}
+        else:
+            try:
+                res = engine(ipo, a)
+            except Exception as e:
+                res = {"status": "error", "note": str(e), "link": REGISTRAR_LINKS.get(ipo["registrar"], "")}
+        # commit definitive outcomes
+        if res.get("status") == "ok":
+            run("""UPDATE applications SET allotment='allotted', allotted_qty=?, refund='na',
+                   checked_note=?, updated_at=datetime('now','localtime') WHERE id=?""",
+                (int(res.get("allotted_qty") or 0), res.get("note", ""), a["id"]))
+        elif res.get("status") == "not_found":
+            run("""UPDATE applications SET allotment='not_allotted', allotted_qty=0,
+                   refund=CASE WHEN refund='na' THEN 'pending' ELSE refund END,
+                   checked_note=?, updated_at=datetime('now','localtime') WHERE id=?""",
+                (res.get("note", ""), a["id"]))
+        else:
+            run("UPDATE applications SET checked_note=?, updated_at=datetime('now','localtime') WHERE id=?",
+                (res.get("note", ""), a["id"]))
+        results.append({"application_id": a["id"], "account_id": a["account_id"],
+                        "holder": a["holder"], **{k: res.get(k) for k in
+                        ("status", "allotted_qty", "note", "link", "matched_company") if res.get(k) is not None}})
+    return results
+
+
+def notify_alotment_result(ipo: dict, results: list):
+    decided = [r for r in results if r.get("status") in ("ok", "not_found")]
+    if not decided:
+        return
+    wins = [r for r in results if r.get("status") == "ok"]
+    body = ("✅ " + "; ".join(f"{r['holder']} {r.get('allotted_qty') or ''}sh" for r in wins)) if wins \
+        else "No allotments this time — refunds will unblock in 1–2 days."
+    send_push(f"📢 {ipo['name'][:28]} — allotment out!",
+              f"{body}  ({len(wins)}/{len(results)} allotted)")
+
+
+@app.post("/api/ipos/{iid}/check_allotment")
+def check_allotment(iid: int):
+    ipo = rows("SELECT * FROM ipos WHERE id=?", (iid,))
+    if not ipo:
+        raise HTTPException(404, "ipo not found")
+    ipo = ipo[0]
+    apps = rows("SELECT 1 x FROM applications WHERE ipo_id=? AND applied=1 LIMIT 1", (iid,))
+    if not apps:
+        raise HTTPException(400, "No applications recorded for this IPO yet")
+    results = run_allotment_checks(ipo)
+    try:
+        notify_alotment_result(ipo, results)
+    except Exception as e:
+        print("[push] allotment notify failed:", e, flush=True)
+    return {"ok": True, "results": results}
+
+
+@app.get("/api/alerts")
+def api_alerts():
+    try:
+        return {"ok": True, "alerts": compute_alerts(), "ts": ist_now().strftime("%d %b %Y, %I:%M %p IST")}
+    except Exception as e:
+        return {"ok": False, "alerts": [], "error": str(e)}
+
+
+@app.get("/api/market")
+def api_market():
+    return arthan.market_payload()
+
+
+@app.get("/api/market/ipo/{iid}")
+def api_market_ipo(iid: int):
+    return arthan.ipo_snapshot(iid)
+
+
+@app.post("/api/market/refresh")
+def api_market_refresh():
+    return arthan.refresh_market(force=True)
+
+
+@app.get("/api/market/verify")
+def api_market_verify():
+    return arthan.daily_verification()
+
+
+@app.post("/api/gmp/refresh")
+def api_gmp_refresh():
+    return refresh_gmp()
+
+
+@app.post("/api/ipos/{iid}/fetch_cmp")
+def api_fetch_cmp(iid: int):
+    ipo = rows("SELECT * FROM ipos WHERE id=?", (iid,))
+    if not ipo:
+        raise HTTPException(404, "ipo not found")
+    cmp_, sym, err = fetch_cmp_for(ipo[0])
+    if not cmp_:
+        raise HTTPException(400, f"price unavailable ({err or 'no quote yet'})")
+    ipo = rows("SELECT * FROM ipos WHERE id=?", (iid,))[0]
+    issue = ipo.get("price_max") or 0
+    pct = (cmp_ - issue) / issue * 100 if issue else 0
+    return {"ok": True, "cmp": cmp_, "symbol": sym, "chg_pct": round(pct, 2)}
+
+
+# quiet common probes
+@app.get("/favicon.ico")
+def favicon():
+    return FileResponse(BASE / "static" / "icons" / "icon-512.png")
+
+
+# ----------------------------------------------------------------------------
+# background scheduler: GMP (15 min), subscription (15 min), IPO list sync
+# (daily), listing-day CMP (15 min), auto-allotment sweep (30 min),
+# alert push notifications (15 min)
+# ----------------------------------------------------------------------------
+
+def kv_get(k, default=None):
+    r = rows("SELECT v FROM kv WHERE k=?", (k,))
+    return r[0]["v"] if r else default
+
+
+def kv_set(k, v):
+    run("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
+
+
+def push_new_alerts():
+    """Push high-severity alerts to subscribed phones (diffed against seen set)."""
+    if not rows("SELECT 1 x FROM push_subs LIMIT 1"):
+        return
+    alerts = compute_alerts()
+    prev = kv_get("seen_alerts")
+    seen = set(json.loads(prev)) if prev else set()
+    if prev is None:
+        kv_set("seen_alerts", json.dumps(sorted({f"{a['kind']}|{a['title']}|{a['detail']}" for a in alerts})))
+        return  # first run: seed without spamming
+    fresh = []
+    for a in alerts:
+        key = f"{a['kind']}|{a['title']}|{a['detail']}"
+        if key not in seen:
+            seen.add(key)
+            if a.get("sev") == "high":
+                fresh.append(a)
+    kv_set("seen_alerts", json.dumps(sorted(seen)[-400:]))
+    if not fresh:
+        return
+    if len(fresh) == 1:
+        send_push(fresh[0]["title"], fresh[0]["detail"])
+    else:
+        send_push(f"🔔 {len(fresh)} new IPO alerts",
+                  " • ".join(a["title"] for a in fresh[:3]) + ("…" if len(fresh) > 3 else ""))
+
+
+def scheduler():
+    last = {"gmp": 0.0, "sync": "", "sub": 0.0, "auto": 0.0, "push": 0.0,
+            "market": 0.0, "verify": ""}
+    while True:
+        try:
+            time.sleep(45)  # let the web server boot first
+            now = time.time()
+            # ARTHAN market-intelligence refresh every ~30 min
+            if now - last["market"] > 30 * 60:
+                try:
+                    res = arthan.refresh_market()
+                    print("[sched] ARTHAN market refresh:", res, flush=True)
+                except Exception as e:
+                    print("[sched] ARTHAN error:", e, flush=True)
+                last["market"] = now
+            # daily deep verification after 18:15 IST
+            if last["verify"] != today_str() and ist_now().hour >= 18:
+                try:
+                    res = arthan.daily_verification()
+                    print("[sched] ARTHAN daily verification:", res, flush=True)
+                except Exception as e:
+                    print("[sched] ARTHAN verify error:", e, flush=True)
+                last["verify"] = today_str()
+            # GMP refreshed every 15 min during market activity
+            if now - last["gmp"] > 15 * 60:
+                res = refresh_gmp()
+                print("[sched] GMP refresh:", res, flush=True)
+                last["gmp"] = now
+            # live subscription status (QIB/sHNI/bHNI/Retail) every ~15 min
+            if now - last["sub"] > 15 * 60:
+                res = refresh_subscriptions()
+                print("[sched] subscription refresh:", res, flush=True)
+                last["sub"] = now
+            # full IPO list sync once a day (IST date)
+            if last["sync"] != today_str():
+                res = sync_live_ipos()
+                print("[sched] IPO sync:", res, flush=True)
+                last["sync"] = today_str()
+            # auto allotment sweep: closed IPOs whose results aren't in yet (~30 min)
+            if now - last["auto"] > 30 * 60:
+                try:
+                    for p in rows("SELECT * FROM ipos"):
+                        if ipo_status(p) != "result_pending" or p["registrar"] not in ENGINES:
+                            continue
+                        if not rows("""SELECT 1 x FROM applications
+                                       WHERE ipo_id=? AND applied=1 AND allotment='pending' LIMIT 1""",
+                                    (p["id"],)):
+                            continue
+                        rs = run_allotment_checks(p)
+                        notify_alotment_result(p, rs)
+                except Exception as e:
+                    print("[sched] auto-allotment error:", e, flush=True)
+                last["auto"] = now
+            # push new high-severity alerts to phones
+            if now - last["push"] > 15 * 60:
+                try:
+                    push_new_alerts()
+                except Exception as e:
+                    print("[sched] push-alerts error:", e, flush=True)
+                last["push"] = now
+            # listing-day prices every 15 min
+            updated = refresh_listing_cmps()
+            if updated:
+                print("[sched] CMP updates:", updated, flush=True)
+            time.sleep(15 * 60)
+        except Exception as e:
+            print("[sched] error:", e, flush=True)
+            time.sleep(300)
+
+
+arthan.ensure_default_watch()  # safe here: kv helpers are defined by now
+threading.Thread(target=scheduler, daemon=True).start()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)),
+                log_level="warning")

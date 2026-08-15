@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b1220">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" type="image/png" href="/static/icons/icon-512.png">
+<link rel="apple-touch-icon" href="/static/icons/icon-512.png">
+<title>IPO Command Center</title>
+<style>
+:root{
+  --bg:#0b1220; --card:#121b2e; --card2:#182339; --line:#243150;
+  --txt:#e6ecf5; --mut:#8b9bb5; --acc:#4f8cff; --grn:#22c55e; --red:#ef4444;
+  --amb:#f59e0b; --prp:#a78bfa;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;font-size:14px}
+header{padding:14px 22px;display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--line);background:var(--card);position:sticky;top:0;z-index:50;flex-wrap:wrap}
+header h1{font-size:18px;font-weight:650;letter-spacing:.2px}
+header h1 span{color:var(--acc)}
+.bellbtn{position:relative;background:var(--card2);border:1px solid var(--line);border-radius:10px;color:var(--txt);padding:7px 12px;cursor:pointer;font-size:15px}
+.bellbtn:hover{border-color:var(--acc)}
+#bell-count{position:absolute;top:-7px;right:-7px;background:var(--red);color:#fff;border-radius:12px;font-size:10.5px;font-weight:700;padding:2px 6px;display:none}
+#alert-drawer{position:fixed;top:64px;right:16px;width:380px;max-width:94vw;max-height:72vh;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:13px;z-index:90;display:none;box-shadow:0 14px 40px rgba(0,0,0,.5);padding:14px}
+#alert-drawer.show{display:block}
+.alert-row{border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-bottom:8px;background:var(--card2);font-size:12.5px}
+.alert-row b{font-size:13px}
+.sev-high{border-left:3px solid var(--red)}.sev-med{border-left:3px solid var(--amb)}.sev-info{border-left:3px solid var(--acc)}
+.badge{background:var(--card2);border:1px solid var(--line);border-radius:20px;padding:4px 12px;font-size:12px;color:var(--mut)}
+nav{display:flex;gap:4px;margin-left:auto;flex-wrap:wrap}
+nav button{background:none;border:1px solid transparent;color:var(--mut);padding:7px 14px;border-radius:9px;cursor:pointer;font-size:13.5px;font-weight:550}
+nav button:hover{color:var(--txt)}
+nav button.on{background:var(--acc);color:#fff}
+main{padding:20px 22px;max-width:1500px;margin:0 auto}
+.grid-kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:14px 16px}
+.kpi .l{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.6px}
+.kpi .v{font-size:21px;font-weight:700;margin-top:5px}
+.kpi .s{font-size:12px;color:var(--mut);margin-top:3px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:16px;margin-bottom:16px}
+.card h3{font-size:14.5px;margin-bottom:12px;color:var(--txt)}
+.card h3 small{color:var(--mut);font-weight:400}
+table{width:100%;border-collapse:collapse}
+th{color:var(--mut);font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:8px 9px;border-bottom:1px solid #1a2438;vertical-align:middle}
+tr:hover td{background:#141f36}
+input,select,textarea{background:#0e1730;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:7px 10px;font-size:13px;font-family:inherit}
+input:focus,select:focus{outline:none;border-color:var(--acc)}
+input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
+.btn{background:var(--acc);border:none;color:#fff;border-radius:9px;padding:8px 15px;font-size:13px;font-weight:600;cursor:pointer}
+.btn:hover{filter:brightness(1.12)}
+.btn.sm{padding:5px 11px;font-size:12px;border-radius:7px}
+.btn.ghost{background:var(--card2);border:1px solid var(--line);color:var(--txt)}
+.btn.warn{background:var(--amb);color:#111}
+.btn.danger{background:transparent;border:1px solid var(--red);color:var(--red)}
+.chip{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11.5px;font-weight:650;white-space:nowrap}
+.c-open{background:#123a2a;color:#4ade80}.c-upcoming{background:#1b2a4a;color:#7aa5ff}
+.c-result_pending{background:#3a2c12;color:#fbbf24}.c-allotment_done{background:#2a2440;color:#c4b5fd}
+.c-listed{background:#12303f;color:#67e8f9}.c-closed{background:#2a2f3a;color:#9aa7bd}
+.pos{color:var(--grn)}.neg{color:var(--red)}.mut{color:var(--mut)}
+.row-actions{display:flex;gap:6px;flex-wrap:wrap}
+.modal-bg{position:fixed;inset:0;background:rgba(3,7,18,.72);display:none;z-index:100;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
+.modal-bg.show{display:flex}
+.modal{background:var(--card);border:1px solid var(--line);border-radius:14px;width:560px;max-width:96vw;padding:20px 22px}
+.modal h3{margin-bottom:14px;font-size:16px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px 14px}
+.form-grid .full{grid-column:1/-1}
+.field label{display:block;font-size:11.5px;color:var(--mut);margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px}
+.field input,.field select,.field textarea{width:100%}
+.modal .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+#toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:10px 18px;display:none;z-index:300;font-size:13.5px;max-width:90vw}
+.checkres{max-height:280px;overflow:auto;margin-top:10px}
+.checkres div{padding:7px 10px;border:1px solid var(--line);border-radius:9px;margin-bottom:7px;font-size:12.5px;background:var(--card2)}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+.toolbar select{min-width:280px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:900px){.two{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
+.info{background:#12203a;border:1px solid #2c4b8a;border-radius:11px;padding:11px 14px;font-size:12.5px;color:#bcd3ff;margin-bottom:14px;line-height:1.5}
+a{color:var(--acc)}
+.pbar{height:6px;background:#1a2438;border-radius:4px;overflow:hidden}
+.pbar div{height:100%;background:var(--acc)}
+h2.sec{font-size:15px;margin:22px 0 10px;color:var(--txt)}
+select.mini,input.mini{padding:4px 7px;font-size:12px;border-radius:6px}
+input.upi-diff{border-color:var(--amb)!important;background:#2a2113!important}
+	td.upi-def{white-space:nowrap}
+input.num{text-align:right;width:90px}
+input.wide{width:150px}
+@media(max-width:720px){
+  header{padding:10px 12px;gap:6px}
+  header h1{font-size:15px}
+  .badge{font-size:11px;padding:3px 9px}
+  nav{margin-left:0;width:100%;overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px}
+  nav button{padding:7px 10px;font-size:12.5px;white-space:nowrap}
+  main{padding:12px 10px}
+  th,td{font-size:12px;padding:6px 7px}
+  .kpi .v{font-size:18px}
+  .card{padding:12px}
+  .modal{padding:16px;width:100%}
+  .form-grid{grid-template-columns:1fr}
+  #alert-drawer{top:auto;bottom:0;left:0;right:0;width:100%;max-width:100%;border-radius:14px 14px 0 0;max-height:78vh}
+  input.wide{width:112px}
+  .toolbar select{min-width:100%}
+  .btn{padding:9px 15px}
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>📈 IPO <span>Command Center</span></h1>
+  <span class="badge" id="hdr-counts">…</span>
+  <button class="bellbtn" id="bell" onclick="toggleAlerts()" title="Alerts & reminders">🔔<span id="bell-count"></span></button>
+  <nav>
+    <button data-tab="dash" class="on">Dashboard</button>
+    <button data-tab="ipos">IPOs</button>
+    <button data-tab="market">📊 Market</button>
+    <button data-tab="apps">Applications</button>
+    <button data-tab="accounts">Accounts</button>
+    <button data-tab="pnl">P&amp;L</button>
+  </nav>
+</header>
+<main>
+  <section id="tab-dash"></section>
+  <section id="tab-ipos" style="display:none"></section>
+  <section id="tab-market" style="display:none"></section>
+  <section id="tab-apps" style="display:none"></section>
+  <section id="tab-accounts" style="display:none"></section>
+  <section id="tab-pnl" style="display:none"></section>
+</main>
+
+<div class="modal-bg" id="modal-bg"><div class="modal" id="modal"></div></div>
+<div id="alert-drawer">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <b>Alerts & reminders</b>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn sm ghost" id="notif-btn" onclick="enableNotifs()">🔔 Enable phone alerts</button>
+      <button class="btn sm ghost" onclick="toggleAlerts()">✕</button>
+    </div>
+  </div>
+  <div class="mut" style="font-size:11px;margin-bottom:8px" id="alert-ts"></div>
+  <div id="alert-list"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+let S={accounts:[],ipos:[],applications:[],today:''};
+let curTab='dash', selIpo=null;
+
+// ---------- utils ----------
+const api=async(u,m='GET',b)=>{const r=await fetch(u,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});
+  if(r.status===401){location.href='/';throw new Error('locked');}
+  const j=await r.json().catch(()=>({})); if(!r.ok){toast(j.detail||j.error||'Error',1); throw new Error(j.detail||'err');} return j;};
+const rs=n=>'₹'+(Number(n)||0).toLocaleString('en-IN',{maximumFractionDigits:0});
+const num=n=>(Number(n)||0).toLocaleString('en-IN',{maximumFractionDigits:2});
+const kr=n=>{n=Number(n)||0;if(Math.abs(n)>=1e7)return '₹'+(n/1e7).toFixed(2)+' Cr';if(Math.abs(n)>=1e5)return '₹'+(n/1e5).toFixed(2)+' L';return rs(n);};
+const pnlCls=n=>n>0?'pos':(n<0?'neg':'mut');
+const pnlTxt=n=>(n>0?'+':'')+kr(n);
+const MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const fd=d=>{if(!d)return'—';const[y,m,dd]=d.split('-');return `${+dd} ${MONTHS[+m-1]}`;};
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let toastTm=null;
+function toast(msg,bad){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';
+  t.style.borderColor=bad?'var(--red)':'var(--grn)';clearTimeout(toastTm);toastTm=setTimeout(()=>t.style.display='none',3200);}
+const ipoById=id=>S.ipos.find(x=>x.id===+id);
+const accById=id=>S.accounts.find(x=>x.id===+id);
+const appFor=(ipo,acc)=>S.applications.find(a=>a.ipo_id===+ipo&&a.account_id===+acc);
+const costPerShare=a=>a.allotted_qty>0?a.amount/a.allotted_qty:0;
+const bookedPnl=a=>a.allotment==='allotted'&&a.sell_qty>0?(a.sell_price-costPerShare(a))*a.sell_qty:0;
+const unrealPnl=(a,ipo)=>a.allotment==='allotted'?( (ipo.cmp||0)-costPerShare(a) )*Math.max(0,a.allotted_qty-a.sell_qty):0;
+
+async function refresh(){S=await api('/api/state');
+  document.getElementById('hdr-counts').textContent=`${S.accounts.filter(a=>a.active).length} accounts • ${S.ipos.filter(i=>i.status==='open').length} IPOs open`;
+  render();}
+
+// ---------- tabs ----------
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{curTab=b.dataset.tab;
+  document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));
+  document.querySelectorAll('main section').forEach(s=>s.style.display='none');
+  document.getElementById('tab-'+curTab).style.display='block';render();});
+
+function render(){
+  ({dash:renderDash,ipos:renderIpos,market:renderMarket,apps:renderApps,accounts:renderAccounts,pnl:renderPnl})[curTab]();
+}
+
+// ---------- MARKET (self-verifying GMP / subscription intelligence) ----------
+let MKT=null, mktSub='gmp', mktSnap=null, mktSnapId=null;
+const stateDot=st=>({verified:'🟢',single:'🟡',diverged:'🔴',kept:'🟡',none:'⚪'}[st]||'⚪');
+const stateTxt=st=>({verified:'2 sources agree',single:'1 source',diverged:'sources differ — showing freshest',kept:'kept last verified value'}[st]||'no data');
+const fmtX=n=>n==null?'—':num(n)+'×';
+async function loadMkt(force){if(MKT&&!force)return;
+  try{MKT=await api('/api/market');}catch(e){toast('Market data load failed',1);}}
+function renderMarket(){
+  const el=document.getElementById('tab-market');
+  el.innerHTML=`<div class="mut" style="padding:30px;text-align:center">Loading market boards…</div>`;
+  loadMkt(false).then(()=>{if(curTab==='market')drawMarket();});
+}
+window.drawMarket=()=>{
+  const el=document.getElementById('tab-market');
+  if(!MKT){el.innerHTML='<div class="card mut">Market engine has not produced data yet — it warms up within a minute of server start.</div>';return;}
+  const g=(MKT.gmp_board&&MKT.gmp_board.rows)||[], sub=(MKT.sub_board&&MKT.sub_board.rows)||[];
+  const tr=MKT.tracked||{};
+  const ver=MKT.verify||{}, ls=MKT.last_summary||{};
+  el.innerHTML=`
+  <div class="toolbar" style="align-items:center">
+    ${[['gmp','💹 GMP board'],['sub','🧾 Subscription'],['ipo','🔎 Per-IPO'],['qc','✔ Verification']].map(([k,l])=>
+      `<button class="btn sm ${mktSub===k?'':'ghost'}" onclick="mktSub='${k}';drawMarket()">${l}</button>`).join('')}
+    <span style="flex:1"></span>
+    <button class="btn sm ghost" id="mktbtn" onclick="mktRefresh(this)">↻ Refresh now</button>
+  </div>
+  <div class="mut" style="font-size:11.5px;margin-bottom:8px">
+    Updated: ${esc(MKT.last_refresh||'—')}${MKT.gmp_board&&MKT.gmp_board.at?` • board ${esc(MKT.gmp_board.at)}`:''}
+    &nbsp;|&nbsp; ${stateDot('verified')} 2 sources agree &nbsp;${stateDot('single')} 1 source &nbsp;${stateDot('diverged')} sources differ &nbsp;•&nbsp; a number that fails the double-check is <b>not</b> shown — the last verified value stays.
+  </div>
+  ${mktSub==='gmp'?`<div class="card"><h3>💹 GMP board <small>— grey market premium & expected listing</small></h3>
+    <div style="overflow-x:auto"><table><thead><tr><th style="text-align:left">IPO</th><th>GMP ₹</th><th>Est listing ₹</th><th>Gain %</th><th>Dates</th><th>Type</th><th>Status</th><th>Source ts</th></tr></thead><tbody>
+    ${g.map(r=>`<tr><td style="text-align:left"><b>${esc(r.name)}</b></td><td>${r.gmp!=null?num(r.gmp):'—'}</td>
+      <td>${r.est_listing!=null?num(r.est_listing):'—'}</td><td class="${(r.est_pct||0)>0?'pos':'mut'}">${r.est_pct!=null?num(r.est_pct)+'%':'—'}</td>
+      <td class="mut">${esc(r.dates_txt||'')}</td><td class="mut">${esc(r.board||'')}</td><td>${esc(r.status||'')}</td><td class="mut">${esc(r.updated||'')}</td></tr>`).join('')||'<tr><td colspan="8" class="mut">no board data yet</td></tr>'}
+    </tbody></table></div>
+    <div class="mut" style="font-size:11.5px;margin-top:6px">Kostak &amp; Subject-to-Sauda are published by grey-market trackers (InvestorGain) only for hot issues — see the Per-IPO view; when unpublished the app shows —.</div>
+    </div>`:''}
+  ${mktSub==='sub'?`<div class="card"><h3>🧾 Live subscription board <small>— times subscribed</small></h3>
+    <div style="overflow-x:auto"><table><thead><tr><th style="text-align:left">IPO</th><th>QIB</th><th>NII</th><th>Retail</th><th>Total</th><th>Closes</th><th>Type</th><th>Source ts</th></tr></thead><tbody>
+    ${sub.map(r=>`<tr><td style="text-align:left"><b>${esc(r.name)}</b></td><td>${fmtX(r.qib)}</td><td>${fmtX(r.nii)}</td><td>${fmtX(r.rii)}</td><td><b>${fmtX(r.total)}</b></td><td class="mut">${esc(r.close_txt||'')}</td><td class="mut">${esc(r.board||'')}</td><td class="mut">${esc(r.updated||'')}</td></tr>`).join('')||'<tr><td colspan="8" class="mut">no board data yet</td></tr>'}
+    </tbody></table></div>
+    <div class="mut" style="font-size:11.5px;margin-top:6px">sHNI/bHNI split comes from the IPO Ji feed — see the Per-IPO view for the full break-up.</div>
+    </div>`:''}
+  ${mktSub==='ipo'?`<div class="card"><h3>🔎 Per-IPO numbers</h3>
+    <select id="mkt-pick" class="wide" style="max-width:100%;padding:9px;border-radius:9px;background:#0e1730;color:var(--txt);border:1px solid var(--line)" onchange="mktSnapId=this.value;mktSnap=null;drawIpoSnap()">
+      <option value="">— pick an IPO —</option>
+      ${S.ipos.map(i=>`<option value="${i.id}" ${+mktSnapId===i.id?'selected':''}>${esc(i.name)}</option>`).join('')}
+    </select>
+    <div id="mkt-snap" style="margin-top:10px">${mktSnap?mktSnap:''}</div></div>`:''}
+  ${mktSub==='qc'?`<div class="card"><h3>✔ Daily verification report</h3>
+    <div class="mut" style="font-size:12.5px;line-height:1.7">
+    Last deep check: <b>${esc(ver.at||'not run yet today')}</b><br>
+    ${Object.entries(ver).filter(([k])=>k!=='at').map(([k,v])=>`<b>${esc(k)}</b>: ${esc(Array.isArray(v)?(v.join(' • ')||'none'):String(v))}<br>`).join('')||'—'}
+    </div>
+    <h3 style="margin-top:14px">👁 Watch-list (auto-detects new IPOs)</h3>
+    ${(MKT.watch||[]).map(w=>`<div style="padding:6px 0;border-bottom:1px solid #1a2438"><b>${esc(w.label)}</b> — ${w.found?`<span class="pos">PUBLISHED as “${esc(w.found.name)}” (${esc(w.found.at)})</span>`:'<span class="amb">not published by sources yet — the engine checks every 30 min and adds it automatically the moment it appears</span>'}</div>`).join('')||'<div class="mut">nothing watched</div>'}
+    <div class="mut" style="font-size:11.5px;margin-top:10px">If all three sources go down at once, the last verified numbers stay on screen with their timestamps — nothing silently turns to 0.</div>
+    <button class="btn sm ghost" style="margin-top:10px" onclick="api('/api/market/verify').then(()=>{toast('Deep verification done');MKT=null;drawMarket();})">Run deep verification now</button>
+  </div>`:''}`;
+  if(mktSub==='ipo'&&mktSnapId&&!mktSnap)drawIpoSnap();
+};
+window.mktRefresh=async(b)=>{b.disabled=true;b.textContent='Refreshing…';
+  try{const r=await api('/api/market/refresh','POST');
+    toast(`Market refresh: ${r.matched} IPO(s) matched, ${r.verified} fully verified${r.unstable?.length?`, ${r.unstable.length} unstable rows kept old values`:''}`);
+  }catch(e){} MKT=null;b.disabled=false;b.textContent='↻ Refresh now';drawMarket();};
+window.drawIpoSnap=async()=>{
+  const box=document.getElementById('mkt-snap');if(!box)return;
+  box.innerHTML='<div class="mut">loading…</div>';
+  let j;try{j=await api('/api/market/ipo/'+mktSnapId);}catch(e){box.innerHTML='<div class="neg">failed</div>';return;}
+  if(!j.ok){box.innerHTML='<div class="neg">not found</div>';return;}
+  const p=j.ipo,m=j.market||{},s=(m.sub)||j.legacy_sub||{};
+  const row=(l,v,extra)=>`<tr><td style="text-align:left" class="mut">${l}</td><td>${v}</td><td class="mut" style="text-align:left">${extra||''}</td></tr>`;
+  mktSnap=`
+  <div class="grid-kpi" style="margin:10px 0">
+    <div class="kpi"><div class="l">Status</div><div class="v" style="font-size:15px">${STATUS_LABEL[p.status]||p.status}</div><div class="s">${fd(p.open_date)} → ${fd(p.close_date)}</div></div>
+    <div class="kpi"><div class="l">GMP ${stateDot(m.gmp_state)}</div><div class="v ${m.gmp>0?'pos':''}">${m.gmp!=null?rs(m.gmp):'—'}</div><div class="s">${stateTxt(m.gmp_state)}${m.gmp_avg!=null?` • avg ${rs(m.gmp_avg)}`:""}</div></div>
+    <div class="kpi"><div class="l">Est listing</div><div class="v ${m.est_pct>0?'pos':''}">${m.est_listing?('₹'+num(m.est_listing)):'—'}</div><div class="s">${m.est_pct!=null?('expected '+num(m.est_pct)+'% gain'):'—'}</div></div>
+    <div class="kpi"><div class="l">Subscription ${stateDot(m.sub_state)}</div><div class="v" style="font-size:15px">${s.total!=null?num(s.total)+'×':'—'}</div><div class="s">${stateTxt(m.sub_state)}</div></div>
+  </div>
+  <table><tbody>
+    ${row('Price band', p.price_max?(`₹${num(p.price_min)} – ₹${num(p.price_max)}`):'—')}
+    ${row('Lot size', p.lot_size?num(p.lot_size)+' shares':'—')}
+    ${row('IPO dates', fd(p.open_date)+' → '+fd(p.close_date))}
+    ${row('Allotment date', fd(p.allotment_date), j.allotment_time_hint?('time: '+j.allotment_time_hint):'')}
+    ${row('Listing date', fd(p.listing_date))}
+    ${row('GMP today', m.gmp!=null?rs(m.gmp):'—', stateTxt(m.gmp_state))}
+    ${row('Avg GMP (7 days)', m.gmp_avg!=null?rs(m.gmp_avg):'—', (j.gmp_history||[]).map(h=>`${fd(h.day)}: ${rs(h.gmp)}`).slice(0,4).join(' • '))}
+    ${row('Est listing price', m.est_listing?('₹'+num(m.est_listing)):'—', m.est_pct!=null?(num(m.est_pct)+'% expected gain'):'')}
+    ${row('Kostak (per application)', m.kostak!=null?rs(m.kostak):'—', m.kostak!=null?'':'not published by trackers yet')}
+    ${row('Subject-to-Sauda', m.sauda!=null?rs(m.sauda):'—', m.sauda!=null?'':'not published by trackers yet')}
+    ${row('QIB ×', fmtX(s.qib))}
+    ${row('sHNI (2–10 L) ×', fmtX(s.shni))}
+    ${row('bHNI (>10 L) ×', fmtX(s.bhni))}
+    ${row('Retail ×', fmtX(s.rii))}
+    ${row('Employee ×', fmtX(s.emp))}
+    ${row('Total ×', `<b>${fmtX(s.total)}</b>`, s.src?('sources: '+s.src):'')}
+    ${row('Data updated', esc(m.updated_at||'—'))}
+  </tbody></table>`;
+  box.innerHTML=mktSnap;};
+
+
+// ---------- DASHBOARD ----------
+function renderDash(){
+  const el=document.getElementById('tab-dash');
+  const apps=S.applications.filter(a=>a.applied);
+  const blocked=apps.filter(a=>a.mandate_status==='approved'&&a.allotment==='pending').reduce((s,a)=>s+a.amount,0)
+    +apps.filter(a=>a.allotment==='not_allotted'&&a.refund==='pending').reduce((s,a)=>s+a.amount,0);
+  const awaitingRefund=apps.filter(a=>a.allotment==='not_allotted'&&a.refund==='pending').reduce((s,a)=>s+a.amount,0);
+  const mandPend=apps.filter(a=>a.mandate_status==='pending');
+  const booked=apps.reduce((s,a)=>s+bookedPnl(a),0);
+  const unreal=apps.reduce((s,a)=>s+unrealPnl(a,ipoById(a.ipo_id)||{cmp:0}),0);
+  const openIpos=S.ipos.filter(i=>i.status==='open');
+
+  // action items
+  const acts=[];
+  mandPend.forEach(a=>{const i=ipoById(a.ipo_id),ac=accById(a.account_id);if(i&&i.status!=='listed')
+    acts.push({t:'UPI mandate pending',d:`${esc(ac?ac.holder:'?')} — <b>${esc(i.name)}</b> • ${rs(a.amount)} ${a.upi?`• UPI: <code>${esc(a.upi)}</code>`:''}`,cls:'neg'});});
+  apps.filter(a=>a.allotment==='not_allotted'&&a.refund==='pending').forEach(a=>{const i=ipoById(a.ipo_id),ac=accById(a.account_id);
+    acts.push({t:'Refund / unblock pending',d:`${esc(ac?ac.holder:'?')} — <b>${esc(i?i.name:'?')}</b> • ${rs(a.amount)}`,cls:''});});
+  S.ipos.forEach(i=>{
+    if(i.allotment_date&&i.status==='result_pending'&&i.allotment_date<=S.today)
+      acts.push({t:'Allotment day — run auto-check',d:`<b>${esc(i.name)}</b> (${esc(i.registrar)})`,act:`goApps(${i.id},1)`});
+    if(i.listing_date===S.today)acts.push({t:'Lists today 🔔',d:`<b>${esc(i.name)}</b> — set CMP in IPO edit, record sells in Applications`,act:`goApps(${i.id})`});
+  });
+  openIpos.forEach(i=>{const applied=S.applications.filter(a=>a.ipo_id===i.id&&a.applied).length;
+    const total=S.accounts.filter(a=>a.active).length;
+    if(applied<total)acts.push({t:'Not all accounts applied',d:`<b>${esc(i.name)}</b> — applied ${applied}/${total} (closes ${fd(i.close_date)})`,act:`goApps(${i.id})`});});
+
+  el.innerHTML=`
+  <div class="info">💡 Allotment is <b>PAN-based</b> — keep one unique PAN per account or exchanges reject duplicate bids. This app never asks for your demat/broker passwords; allotment checks use only PAN / CDSL BO ID (public registrar data).</div>
+  <div class="grid-kpi">
+    <div class="kpi"><div class="l">IPOs open now</div><div class="v">${openIpos.length}</div><div class="s">${S.ipos.filter(i=>i.status==='upcoming').length} upcoming</div></div>
+    <div class="kpi"><div class="l">Capital blocked</div><div class="v">${kr(blocked)}</div><div class="s">mandates approved, results awaited</div></div>
+    <div class="kpi"><div class="l">Refunds pending</div><div class="v" style="color:var(--amb)">${kr(awaitingRefund)}</div><div class="s">not allotted, unblock awaited</div></div>
+    <div class="kpi"><div class="l">Mandates to approve</div><div class="v" style="color:${mandPend.length?'var(--red)':'var(--grn)'}">${mandPend.length}</div><div class="s">UPI requests waiting</div></div>
+    <div class="kpi"><div class="l">Booked profit</div><div class="v ${pnlCls(booked)}">${pnlTxt(booked)}</div><div class="s">from sold allotments</div></div>
+    <div class="kpi"><div class="l">Unrealized P&L</div><div class="v ${pnlCls(unreal)}">${pnlTxt(unreal)}</div><div class="s">open allotment positions at CMP</div></div>
+  </div>
+  <div class="two">
+    <div class="card"><h3>⚡ Needs your action <small>(${acts.length})</small></h3>
+      ${acts.length?acts.map(a=>`<div style="padding:7px 0;border-bottom:1px solid #1a2438;display:flex;justify-content:space-between;gap:10px;align-items:center">
+        <div><span class="${a.cls||''}" style="font-weight:600">${a.t}</span><br><span class="mut">${a.d}</span></div>
+        ${a.act?`<button class="btn sm ghost" onclick="${a.act}">Open</button>`:''}</div>`).join('')
+      :'<div class="mut">All clear 🎉</div>'}
+    </div>
+    <div class="card"><h3>🟢 Open / upcoming mainboard IPOs</h3>
+      ${S.ipos.filter(i=>['open','upcoming'].includes(i.status)&&i.board==='Mainboard').map(i=>`
+      <div style="padding:8px 0;border-bottom:1px solid #1a2438;display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div><b>${esc(i.name)}</b> ${i.gmp?`<span class="chip c-listed" title="Grey market premium">GMP ₹${num(i.gmp)}</span>`:''} ${i.sub&&i.sub.total!=null?`<span class="chip" title="Live subscription — QIB ${i.sub.qib??'—'}× • sHNI ${i.sub.shni??'—'}× • bHNI ${i.sub.bhni??'—'}× • Retail ${i.sub.rii??'—'}×">SUB ${i.sub.total}×</span>`:''}<br>
+        <span class="mut">${fd(i.open_date)} → ${fd(i.close_date)} ${i.price_max?`• ₹${num(i.price_min)}–${num(i.price_max)} • lot ${num(i.lot_size)}`:'• details not set — edit IPO'}</span></div>
+        <button class="btn sm" onclick="goApps(${i.id})">Apply / track</button>
+      </div>`).join('')||'<div class="mut">No live IPOs tracked. Add one or sync the live list from the IPOs tab.</div>'}
+    </div>
+  </div>
+  ${S.mobile&&S.mobile.url?`
+  <div class="card" style="text-align:center">
+    <h3>📱 Mobile link <small>— scan with your phone camera anytime the phone app stops responding</small></h3>
+    ${S.mobile.qr?`<img src="${S.mobile.qr}" width="150" style="border-radius:10px;border:1px solid var(--line)">`:''}
+    <div class="mut" style="font-size:12px;margin-top:8px;word-break:break-all">${esc(S.mobile.url)}</div>
+    <div class="mut" style="font-size:11.5px;margin-top:6px">if the tunnel changed, this QR always shows the latest working link</div>
+  </div>`:''}
+  <div class="card">
+    <h3>🗄 Data backup</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn sm" onclick="location='/api/backup'">⬇ Download backup</button>
+      <button class="btn sm" onclick="document.getElementById('bkfile').click()">⬆ Restore backup</button>
+      <input type="file" id="bkfile" accept=".json,application/json" style="display:none" onchange="restoreBackup(this)">
+    </div>
+    <div class="mut" style="font-size:11.5px;margin-top:6px">the server also auto-saves a backup after every change you make</div>
+  </div>`;
+}
+window.restoreBackup=async(inp)=>{
+  const f=inp.files&&inp.files[0];inp.value='';if(!f)return;
+  if(!confirm('Restore this backup? It REPLACES all data currently in the app.'))return;
+  let j;try{j=JSON.parse(await f.text());}catch(e){alert('That file is not a valid backup.');return;}
+  try{
+    const r=await fetch('/api/backup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(j)});
+    const d=await r.json();
+    if(r.ok&&d.ok){alert('✅ Restored: '+d.counts.accounts+' accounts, '+d.counts.ipos+' IPOs, '+d.counts.applications+' applications');location.reload();}
+    else alert('Restore failed: '+(d.detail||d.error||('HTTP '+r.status)));
+  }catch(e){alert('Restore failed: '+e.message);}
+};
+window.goApps=(id,check)=>{selIpo=id;curTab='apps';
+  document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x.dataset.tab==='apps'));
+  document.querySelectorAll('main section').forEach(s=>s.style.display='none');
+  document.getElementById('tab-apps').style.display='block';renderApps();
+  if(check)setTimeout(()=>runAllotmentCheck(),200);};
+
+// ---------- IPOs ----------
+const STATUS_LABEL={open:'OPEN',upcoming:'UPCOMING',result_pending:'RESULT AWAITED',allotment_done:'ALLOTMENT DONE',listed:'LISTED'};
+function renderIpos(){
+  const el=document.getElementById('tab-ipos');
+  el.innerHTML=`
+  <div class="toolbar">
+    <button class="btn" onclick="ipoModal()">+ Add IPO</button>
+    <button class="btn ghost" id="syncbtn" onclick="syncLive()">🔄 Sync live IPO list</button>
+    <button class="btn ghost" id="gmpbtn" onclick="refreshGmp()">💹 Refresh GMP</button>
+    <span class="mut">GMP + subscription auto-refresh every 15 min (Chittorgarh + IPO Ji). CMP auto-fetches from listing day onwards.</span>
+  </div>
+  ${S.ipos.map(i=>{const minAmt=i.price_max&&i.lot_size?i.price_max*i.lot_size:0;
+    const s=i.sub||{};
+    return `<div class="card" style="margin-bottom:10px">
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+      <b>${esc(i.name)}</b>
+      <span class="chip c-${i.status}">${STATUS_LABEL[i.status]||i.status}</span>
+    </div>
+    <div class="mut" style="font-size:12px;margin-top:4px">${fd(i.open_date)} → ${fd(i.close_date)} • Allot ${fd(i.allotment_date)} • List ${fd(i.listing_date)}${i.board==='SME'?' • <b>SME</b>':''}</div>
+    <div style="font-size:13px;margin-top:5px">${i.price_max?`₹${num(i.price_min)}–₹${num(i.price_max)} &nbsp;•&nbsp; lot ${num(i.lot_size)} &nbsp;•&nbsp; min ${rs(minAmt)}`:'<span class="mut">price band not set — Edit IPO</span>'}</div>
+    <div style="margin-top:7px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      ${i.gmp?`<span class="chip c-listed" title="Grey market premium — ${i.mkt?stateTxt(i.mkt.gmp_state):''}">${i.mkt?stateDot(i.mkt.gmp_state):''} GMP ₹${num(i.gmp)}</span>`:''}
+      ${i.mkt&&i.mkt.est_listing&&i.status!=='listed'?`<span class="chip" title="Expected listing price (GMP estimate)">→ ₹${num(i.mkt.est_listing)}${i.mkt.est_pct!=null?` (${i.mkt.est_pct>0?'+':''}${num(i.mkt.est_pct)}%)`:''}</span>`:''}
+      ${s.total!=null?`<span class="chip" title="Total times subscribed">SUB <b>${s.total}×</b></span>`:''}
+      ${i.cmp?`<span class="chip" title="Current market price">CMP ₹${num(i.cmp)}</span>`:''}
+      ${i.applied_cnt?`<span class="chip">${i.applied_cnt} applied${i.allotted_qty?` • <span class="pos">${num(i.allotted_qty)} sh won</span>`:''}</span>`:''}
+      ${i.registrar_link?`<a class="chip" style="text-decoration:none" href="${i.registrar_link}" target="_blank" title="Registrar allotment page">🔗 ${esc(i.registrar)}</a>`:`<span class="chip">${esc(i.registrar)}</span>`}
+    </div>
+    ${s.total!=null?`<div class="mut" style="font-size:12px;margin-top:6px;line-height:1.6">QIB <b>${s.qib??'—'}×</b> &nbsp;•&nbsp; Retail <b>${s.rii??'—'}×</b> &nbsp;•&nbsp; HNI <b>${s.nii??'—'}×</b>${s.shni!=null?` <span title="Small HNI / Big HNI (IPO Ji feed)">(sHNI ${s.shni}× / bHNI ${s.bhni??'—'}×)</span>`:''}${s.emp?` &nbsp;•&nbsp; Emp ${s.emp}×`:''}</div>`:''}
+    <div style="margin-top:9px;display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn sm" onclick="goApps(${i.id})">Apply / track</button>
+      ${i.status==='result_pending'?`<button class="btn sm warn" onclick="goApps(${i.id},true)">Check allotment</button>`:''}
+      ${i.status==='listed'?`<button class="btn sm ghost" onclick="fetchCmp(${i.id})" title="Fetch live price now">↻ CMP</button>`:''}
+      <button class="btn sm ghost" onclick="ipoModal(${i.id})">Edit</button>
+      <button class="btn sm danger" onclick="delIpo(${i.id},'${esc(i.name)}')">✕</button>
+    </div>
+  </div>`;}).join('')||'<div class="card mut">No IPOs yet — add manually or Sync live.</div>'}`;
+}
+window.delIpo=async(id,name)=>{if(!confirm(`Delete "${name}" and all its application rows?`))return;
+  await api('/api/ipos/'+id,'DELETE');toast('Deleted');refresh();};
+window.syncLive=async()=>{const b=document.getElementById('syncbtn');b.disabled=true;b.textContent='Syncing…';
+  try{const r=await api('/api/ipos/sync_live','POST');
+    toast(`Sync done: ${r.fetched} found, ${r.added} new added${r.errors?.length?' • some sources failed':''}`);
+    if(r.errors?.length)console.warn(r.errors);}catch(e){}
+  b.disabled=false;b.textContent='🔄 Sync live IPO list (Chittorgarh)';refresh();};
+window.refreshGmp=async()=>{const b=document.getElementById('gmpbtn');b.disabled=true;b.textContent='Updating…';
+  try{const r=await api('/api/gmp/refresh','POST');
+    if(r.ok===false)toast('GMP refresh failed: '+(r.error||''),1);
+    else toast(`GMP updated for ${r.matched} IPO(s) (${r.total} live quotes scanned)`);}catch(e){}
+  b.disabled=false;b.textContent='💹 Refresh GMP';refresh();};
+window.fetchCmp=async(id)=>{try{const r=await api(`/api/ipos/${id}/fetch_cmp`,'POST');
+    toast(`CMP ₹${r.cmp} (${r.symbol}) • ${r.chg_pct>0?'+':''}${r.chg_pct}% vs issue`);refresh();}
+  catch(e){toast('CMP not available yet — '+(e.message||''),1);}};
+
+window.ipoModal=(id)=>{
+  const i=id?ipoById(id):{name:'',registrar:'Bigshare',registrar_ref:'',open_date:'',close_date:'',price_min:'',price_max:'',lot_size:'',allotment_date:'',listing_date:'',board:'Mainboard',symbol:'',cmp:'',gmp:'',notes:''};
+  openModal(`<h3>${id?'Edit':'Add'} IPO</h3><div class="form-grid">
+    <div class="field full"><label>IPO name</label><input id="f-name" value="${esc(i.name)}" placeholder="e.g. WeWork India Management Ltd"></div>
+    <div class="field"><label>Registrar</label><select id="f-registrar">${['Bigshare','KFin','Link Intime','Other'].map(r=>`<option ${i.registrar===r?'selected':''}>${r}</option>`).join('')}</select></div>
+    <div class="field"><label>Board</label><select id="f-board"><option ${i.board==='Mainboard'?'selected':''}>Mainboard</option><option ${i.board==='SME'?'selected':''}>SME</option></select></div>
+    <div class="field"><label>Open date</label><input id="f-open" type="date" value="${i.open_date||''}"></div>
+    <div class="field"><label>Close date</label><input id="f-close" type="date" value="${i.close_date||''}"></div>
+    <div class="field"><label>Price min (₹)</label><input id="f-pmin" type="number" value="${i.price_min||''}"></div>
+    <div class="field"><label>Price max / cut-off (₹)</label><input id="f-pmax" type="number" value="${i.price_max||''}"></div>
+    <div class="field"><label>Lot size (shares)</label><input id="f-lot" type="number" value="${i.lot_size||''}"></div>
+    <div class="field"><label>NSE symbol (optional)</label><input id="f-symbol" value="${esc(i.symbol||'')}" placeholder="for reference"></div>
+    <div class="field"><label>Allotment date</label><input id="f-allot" type="date" value="${i.allotment_date||''}"></div>
+    <div class="field"><label>Listing date</label><input id="f-list" type="date" value="${i.listing_date||''}"></div>
+    <div class="field"><label>CMP ₹ (set on listing)</label><input id="f-cmp" type="number" step="0.01" value="${i.cmp||''}"></div>
+    <div class="field"><label>GMP ₹ (optional)</label><input id="f-gmp" type="number" step="0.01" value="${i.gmp||''}"></div>
+    <div class="field full"><label>Registrar ref (optional — Bigshare company id / LI clientId for auto allotment)</label><input id="f-ref" value="${esc(i.registrar_ref||'')}"></div>
+    <div class="field full"><label>Notes</label><input id="f-notes" value="${esc(i.notes||'')}"></div>
+  </div>
+  <div class="foot"><button class="btn ghost" onclick="closeModal()">Cancel</button>
+  <button class="btn" onclick="saveIpo(${id||'null'})">Save</button></div>`);};
+window.saveIpo=async(id)=>{
+  const g=x=>document.getElementById(x).value;
+  const b={name:g('f-name'),registrar:g('f-registrar'),board:g('f-board'),open_date:g('f-open'),close_date:g('f-close'),
+    price_min:g('f-pmin'),price_max:g('f-pmax'),lot_size:g('f-lot'),symbol:g('f-symbol'),allotment_date:g('f-allot'),
+    listing_date:g('f-list'),cmp:g('f-cmp'),gmp:g('f-gmp'),registrar_ref:g('f-ref'),notes:g('f-notes')};
+  if(!b.name.trim())return toast('Name required',1);
+  await api(id?'/api/ipos/'+id:'/api/ipos',id?'PUT':'POST',b);
+  closeModal();toast('Saved');refresh();};
+
+// ---------- ACCOUNTS ----------
+function renderAccounts(){
+  const el=document.getElementById('tab-accounts');
+  el.innerHTML=`
+  <div class="toolbar"><button class="btn" onclick="accModal()">+ Add account</button>
+  <span class="mut">Store PAN <b>or</b> 16-digit CDSL BO ID per account — either works for allotment auto-check (Bigshare), PAN works everywhere.</span></div>
+  <div class="card"><div style="overflow:auto"><table><thead><tr><th>Account</th><th>PAN</th><th>CDSL BO ID</th><th>Default UPI ID</th><th>Broker</th><th>Bank</th><th>Sell auth</th><th>Active</th><th>Applications</th><th>Booked P&L</th><th></th></tr></thead><tbody>
+  ${S.accounts.map(a=>{const apps=S.applications.filter(x=>x.account_id===a.id&&x.applied);
+    const booked=apps.reduce((s,x)=>s+bookedPnl(x),0);
+    return `<tr>
+    <td><b>${esc(a.holder)}</b>${a.notes?`<br><span class="mut" style="font-size:11.5px">${esc(a.notes)}</span>`:''}</td>
+    <td>${esc(a.pan)||'<span class="mut">—</span>'}</td>
+    <td>${esc(a.cdsl)||'<span class="mut">—</span>'}</td>
+    <td><code>${esc(a.upi)||'—'}</code></td>
+    <td>${esc(a.broker)||'—'}</td><td>${esc(a.bank)||'—'}</td>
+    <td>${a.auth_mode==='DDPI'?'<span class="chip c-open" title="DDPI/PoA active — can sell anytime without daily TPIN">DDPI ✓</span>'
+        :a.auth_mode==='TPIN'?'<span class="chip c-result_pending" title="CDSL TPIN authorization needed on each sell day">TPIN</span>'
+        :'<span class="mut">—</span>'}</td>
+    <td>${a.active?'✅':'⛔'}</td>
+    <td>${apps.length}</td>
+    <td class="${pnlCls(booked)}">${apps.some(x=>x.sell_qty>0)?pnlTxt(booked):'—'}</td>
+    <td class="row-actions"><button class="btn sm ghost" onclick="accModal(${a.id})">Edit</button>
+    <button class="btn sm danger" onclick="delAcc(${a.id},'${esc(a.holder)}')">✕</button></td></tr>`;}).join('')
+    ||'<tr><td colspan="11" class="mut">No accounts yet — add your 15+ demat accounts here.</td></tr>'}
+  </tbody></table></div></div>`;
+}
+window.delAcc=async(id,name)=>{if(!confirm(`Delete account "${name}" and its application rows?`))return;
+  await api('/api/accounts/'+id,'DELETE');toast('Deleted');refresh();};
+window.accModal=(id)=>{
+  const a=id?accById(id):{holder:'',pan:'',cdsl:'',broker:'',bank:'',upi:'',auth_mode:'',notes:'',active:1};
+  openModal(`<h3>${id?'Edit':'Add'} account</h3><div class="form-grid">
+    <div class="field full"><label>Label (e.g. "Papa – Zerodha")</label><input id="f-holder" value="${esc(a.holder)}"></div>
+    <div class="field"><label>PAN</label><input id="f-pan" value="${esc(a.pan)}" placeholder="ABCDE1234F" maxlength="10"></div>
+    <div class="field"><label>CDSL BO ID (16 digits)</label><input id="f-cdsl" value="${esc(a.cdsl)}" maxlength="16"></div>
+    <div class="field"><label>Broker</label><input id="f-broker" value="${esc(a.broker)}" placeholder="Zerodha / Groww / Angel…"></div>
+    <div class="field"><label>Bank (for UPI)</label><input id="f-bank" value="${esc(a.bank)}"></div>
+    <div class="field"><label>Default UPI ID used for IPOs</label><input id="f-upi" value="${esc(a.upi)}" placeholder="name@okaxis"></div>
+    <div class="field"><label>Sell authorization (CDSL)</label><select id="f-authmode">
+      <option value="" ${!a.auth_mode?'selected':''}>Not set</option>
+      <option value="DDPI" ${a.auth_mode==='DDPI'?'selected':''}>DDPI / PoA active — sell anytime</option>
+      <option value="TPIN" ${a.auth_mode==='TPIN'?'selected':''}>CDSL TPIN — needed each sell day</option>
+    </select></div>
+    <div class="field"><label>Active</label><select id="f-active"><option value="1" ${a.active?'selected':''}>Yes</option><option value="0" ${!a.active?'selected':''}>No</option></select></div>
+    <div class="field full"><label>Notes</label><input id="f-notes" value="${esc(a.notes)}"></div>
+  </div>
+  <div class="foot"><button class="btn ghost" onclick="closeModal()">Cancel</button>
+  <button class="btn" onclick="saveAcc(${id||'null'})">Save</button></div>`);};
+window.saveAcc=async(id)=>{
+  const g=x=>document.getElementById(x).value;
+  const b={holder:g('f-holder'),pan:g('f-pan'),cdsl:g('f-cdsl'),broker:g('f-broker'),bank:g('f-bank'),upi:g('f-upi'),auth_mode:g('f-authmode'),active:g('f-active')==='1',notes:g('f-notes')};
+  if(!b.holder.trim())return toast('Label required',1);
+  await api(id?'/api/accounts/'+id:'/api/accounts',id?'PUT':'POST',b);
+  closeModal();toast('Saved');refresh();};
+
+// ---------- APPLICATIONS ----------
+function renderApps(){
+  const el=document.getElementById('tab-apps');
+  if(!selIpo||!ipoById(selIpo))selIpo=(S.ipos.find(i=>i.status==='open')||S.ipos[0]||{}).id||null;
+  const ipo=selIpo?ipoById(selIpo):null;
+  if(!ipo){el.innerHTML='<div class="card mut">Add an IPO first (IPOs tab).</div>';return;}
+  const accts=S.accounts.filter(a=>a.active||appFor(ipo.id,a.id));
+  const rowsHtml=accts.map(a=>{
+    const ap=appFor(ipo.id,a.id)||{applied:0,lots:1,amount:0,upi:a.upi,mandate_status:'pending',allotment:'pending',allotted_qty:0,refund:'na',sell_qty:0,sell_price:0,sold_on:'',app_no:''};
+    const dis=ap.applied?'':'disabled';
+    const cost=ap.allotted_qty>0?ap.amount/ap.allotted_qty:0;
+    const profit=bookedPnl(ap)+unrealPnl(ap,ipo);
+    return `<tr data-acc="${a.id}">
+    <td><b>${esc(a.holder)}</b>${a.active?'':' <span class="chip c-closed">inactive</span>'}<br><span class="mut" style="font-size:11px">${esc(a.pan||a.cdsl||'no PAN/BO ID')}</span></td>
+    <td><input type="checkbox" class="f-applied" ${ap.applied?'checked':''}></td>
+    <td><select class="mini f-allot" ${dis}>${['pending','allotted','not_allotted'].map(s=>`<option value="${s}" ${ap.allotment===s?'selected':''}>${s.replace('_',' ')}</option>`).join('')}</select></td>
+    <td class="upi-def"><span class="mut" style="font-size:11.5px" title="This account's default UPI ID (set in Accounts tab)">${a.upi?esc(a.upi):'<span class="neg">not set</span>'}</span>
+      ${a.upi?`<button type="button" class="btn sm ghost" style="padding:1px 7px;font-size:11px;margin-left:3px" title="Copy default into the Used UPI field" onclick="copyDefUpi(this)" ${dis}>⇐ use</button>`:''}</td>
+    <td><input class="mini wide f-upi ${(ap.upi&&a.upi&&ap.upi!==a.upi)?'upi-diff':''}" data-def="${esc(a.upi||'')}" value="${esc(ap.upi||a.upi||'')}" title="UPI ID actually used for this application — amber highlight = different from default" ${dis}></td>
+    <td class="f-pnl ${pnlCls(profit)}" style="white-space:nowrap">${ap.allotment==='allotted'?pnlTxt(profit)+(cost?`<br><span class="mut" style="font-size:11px">cost ₹${num(cost)}</span>`:''):'<span class="mut">—</span>'}</td>
+    <td><input type="number" class="mini num f-aqty" style="width:70px" min="0" value="${ap.allotted_qty||''}" ${dis}></td>
+    <td><input type="number" class="mini num f-lots" style="width:60px" min="0" value="${ap.lots||1}" ${dis}></td>
+    <td><input type="number" class="mini num f-amount" step="0.01" value="${ap.amount||''}" ${dis}></td>
+    <td><select class="mini f-mandate" ${dis}>${['pending','approved','rejected','expired'].map(s=>`<option ${ap.mandate_status===s?'selected':''}>${s}</option>`).join('')}</select></td>
+    <td><input class="mini wide f-appno" value="${esc(ap.app_no||'')}" placeholder="app no." ${dis}></td>
+    <td><select class="mini f-refund" ${dis}>${[['na','n/a'],['pending','pending'],['received','unblocked ✓']].map(([v,l])=>`<option value="${v}" ${ap.refund===v?'selected':''}>${l}</option>`).join('')}</select></td>
+    <td><input type="number" class="mini num f-sqty" style="width:65px" min="0" value="${ap.sell_qty||''}" ${dis}></td>
+    <td><input type="number" class="mini num f-sprice" style="width:80px" step="0.01" value="${ap.sell_price||''}" ${dis}></td>
+    </tr>`;}).join('');
+  const applied=S.applications.filter(x=>x.ipo_id===ipo.id&&x.applied);
+  const uniqUpis=new Set(applied.map(x=>(x.upi||'').trim().toLowerCase()).filter(Boolean)).size;
+  const blocked=applied.filter(a=>a.mandate_status==='approved'&&a.allotment==='pending').reduce((s,a)=>s+a.amount,0);
+  const allot=applied.filter(a=>a.allotment==='allotted').length;
+  const minAmt=ipo.price_max&&ipo.lot_size?ipo.price_max*ipo.lot_size:0;
+  el.innerHTML=`
+  <div class="toolbar">
+    <select id="ipo-sel" onchange="selIpo=+this.value;renderApps()">
+      ${S.ipos.map(i=>`<option value="${i.id}" ${i.id===ipo.id?'selected':''}>${esc(i.name)} (${STATUS_LABEL[i.status]||i.status})</option>`).join('')}
+    </select>
+    <button class="btn" onclick="applyAll()">⚡ Apply all active accounts</button>
+    <button class="btn ghost" onclick="markAllMandates()" title="Mark mandate approved for every account in this IPO">✓ All mandates approved</button>
+    <button class="btn warn" onclick="runAllotmentCheck()" id="chkbtn">🔍 Auto-check allotment (${esc(ipo.registrar)})</button>
+    ${ipo.registrar_link?`<a class="btn ghost sm" href="${ipo.registrar_link}" target="_blank">🔗 Registrar page</a>`:''}
+    <span class="mut">1 lot ≈ ${minAmt?rs(minAmt):'set price band + lot size'}</span>
+  </div>
+  <div id="checkres" class="checkres" style="display:none"></div>
+  <div class="card">
+    <h3>${esc(ipo.name)} <small>— ${applied.length}/${S.accounts.filter(a=>a.active).length} accounts applied • ${uniqUpis} UPI IDs used • blocked ${kr(blocked)} • ${allot} allotted${ipo.cmp?` • CMP ₹${num(ipo.cmp)}`:''} • changes auto-save</small></h3>
+    <div class="pbar" title="Apply progress"><div style="width:${S.accounts.filter(a=>a.active).length?Math.round(applied.length/S.accounts.filter(a=>a.active).length*100):0}%"></div></div>
+    <div style="height:10px"></div>
+    <div style="overflow:auto"><table><thead><tr>
+      <th>Account</th><th>Applied</th><th>Allotment</th><th>Default UPI ID</th><th>Used UPI ID</th><th>P&L</th><th>Allotted qty</th><th>Lots</th><th>Amount ₹</th><th>Mandate</th><th>App no.</th><th>Refund</th><th>Sell qty</th><th>Sell ₹</th>
+    </tr></thead><tbody>${rowsHtml}</tbody></table></div>
+  </div>`;
+  document.querySelectorAll('#tab-apps tbody tr').forEach(tr=>{
+    tr.querySelectorAll('input,select').forEach(inp=>{
+      inp.addEventListener('change',async()=>{await saveRow(tr);});
+    });
+  });
+}
+async function collectRow(tr){
+  const gv=c=>tr.querySelector(c).value;
+  const gc=c=>tr.querySelector(c).checked;
+  return {ipo_id:selIpo,account_id:+tr.dataset.acc,applied:gc('.f-applied')?1:0,
+    lots:+gv('.f-lots')||0,amount:+gv('.f-amount')||0,upi:gv('.f-upi'),app_no:gv('.f-appno'),
+    mandate_status:gv('.f-mandate'),allotment:gv('.f-allot'),allotted_qty:+gv('.f-aqty')||0,
+    refund:gv('.f-refund'),sell_qty:+gv('.f-sqty')||0,sell_price:+gv('.f-sprice')||0};
+}
+async function saveRow(tr){
+  const b=await collectRow(tr);
+  // if amount empty & applied → let server auto-compute from lots
+  if(!b.amount)delete b.amount;
+  await api('/api/applications','POST',b);
+  S=await api('/api/state');
+  // lightly update row styling without full re-render jump
+  if(b.applied&&!tr.querySelector('.f-lots').value)tr.querySelector('.f-lots').value=1;
+  tr.querySelectorAll('input,select').forEach(x=>{if(!x.classList.contains('f-applied'))x.disabled=!b.applied;});
+  const upiInp=tr.querySelector('.f-upi');
+  if(upiInp)upiInp.classList.toggle('upi-diff',!!(upiInp.dataset.def&&upiInp.value.trim()&&upiInp.value.trim()!==upiInp.dataset.def));
+  const ap=appFor(selIpo,b.account_id)||{},ipo=ipoById(selIpo);
+  const profit=bookedPnl(ap)+unrealPnl(ap,ipo);
+  const cell=tr.querySelector('.f-pnl');
+  cell.className=pnlCls(profit);
+  cell.innerHTML=ap.allotment==='allotted'?pnlTxt(profit):'<span class="mut">—</span>';
+  toast('Saved');
+}
+window.copyDefUpi=btn=>{
+  const tr=btn.closest('tr');
+  const inp=tr.querySelector('.f-upi');
+  if(!inp||!inp.dataset.def)return;
+  inp.value=inp.dataset.def;
+  inp.dispatchEvent(new Event('change'));   // triggers autosave
+};
+window.applyAll=async()=>{
+  const active=S.accounts.filter(a=>a.active);
+  if(!active.length)return toast('Add accounts first',1);
+  let lots=1;const ipo=ipoById(selIpo);
+  const amt=ipo.price_max&&ipo.lot_size?ipo.price_max*ipo.lot_size*lots:0;
+  if(!confirm(`Apply 1 lot in "${ipo.name}" for all ${active.length} active accounts${amt?` (~${rs(amt)} each, ${kr(amt*active.length)} total)`:''}?\nUPI auto-fills from each account's default.`))return;
+  const r=await api(`/api/ipos/${selIpo}/apply`,'POST',{lots,category:'Retail'});
+  toast(`Applied for ${r.applied} accounts ✔`);refresh();};
+window.markAllMandates=async()=>{
+  const ipo=ipoById(selIpo);
+  if(!confirm(`Mark UPI mandate APPROVED for every account in "${ipo.name}"?`))return;
+  const r=await api(`/api/ipos/${selIpo}/mandates`,'POST',{status:'approved'});
+  toast(`✓ ${r.updated} mandates marked approved`);refresh();};
+window.runAllotmentCheck=async()=>{
+  const btn=document.getElementById('chkbtn');btn.disabled=true;btn.textContent='Checking…';
+  const box=document.getElementById('checkres');box.style.display='block';
+  box.innerHTML='<div class="mut">Querying '+esc(ipoById(selIpo).registrar)+' for every account… (5–20 sec)</div>';
+  try{
+    const r=await api(`/api/ipos/${selIpo}/check_allotment`,'POST');
+    box.innerHTML=r.results.map(x=>{
+      const col=x.status==='ok'?'var(--grn)':(x.status==='not_found'?'var(--amb)':'var(--mut)');
+      const lbl=x.status==='ok'?`✅ Allotted ${x.allotted_qty||''} sh`:(x.status==='not_found'?'❌ No allotment record':(x.status==='manual'?'🖐 Check manually':'⚠ '+x.status));
+      return `<div><b>${esc(x.holder)}</b> — <span style="color:${col};font-weight:650">${lbl}</span>
+        ${x.note?`<br><span class="mut">${esc(x.note)}</span>`:''}
+        ${x.matched_company?`<br><span class="mut">matched: ${esc(x.matched_company)}</span>`:''}
+        ${x.link?`<br><a href="${x.link}" target="_blank">Open registrar →</a>`:''}</div>`;}).join('');
+    toast('Allotment check complete');
+  }catch(e){box.innerHTML='<div class="neg">Check failed: '+esc(e.message)+'</div>';}
+  btn.disabled=false;btn.textContent='🔍 Auto-check allotment ('+ipoById(selIpo).registrar+')';
+  refresh();};
+
+// ---------- P&L ----------
+function renderPnl(){
+  const el=document.getElementById('tab-pnl');
+  const apps=S.applications.filter(a=>a.applied&&a.allotment==='allotted');
+  let tInv=0,tBook=0,tOpen=0,tUnreal=0;
+  const rowsH=apps.map(a=>{
+    const ipo=ipoById(a.ipo_id)||{},acc=accById(a.account_id)||{};
+    const cost=costPerShare(a),inv=a.amount,book=bookedPnl(a),unrl=unrealPnl(a,ipo);
+    const openQty=Math.max(0,a.allotted_qty-a.sell_qty),openVal=openQty*(ipo.cmp||0);
+    tInv+=inv;tBook+=book;tOpen+=openVal;tUnreal+=unrl;
+    return `<tr>
+    <td><b>${esc(ipo.name||'?')}</b><br><span class="mut" style="font-size:11px">${fd(ipo.listing_date)}${ipo.symbol?' • '+esc(ipo.symbol):''}</span></td>
+    <td>${esc(acc.holder||'?')}</td>
+    <td>${num(a.allotted_qty)}</td><td>₹${num(cost)}</td><td>${rs(inv)}</td>
+    <td>${ipo.cmp?'₹'+num(ipo.cmp):'<span class="mut">set CMP</span>'}</td>
+    <td>${a.sell_qty?num(a.sell_qty)+' @ ₹'+num(a.sell_price):'—'}</td>
+    <td class="${pnlCls(book)}">${a.sell_qty?pnlTxt(book):'—'}</td>
+    <td>${openQty?num(openQty)+' sh ('+kr(openVal)+')':'—'}</td>
+    <td class="${pnlCls(unrl)}">${openQty?(ipo.cmp?pnlTxt(unrl):'<span class="mut">set CMP</span>'):'—'}</td>
+    <td class="${pnlCls(book+unrl)}" style="font-weight:700">${pnlTxt(book+unrl)}</td>
+    </tr>`;}).join('');
+  el.innerHTML=`
+  <div class="grid-kpi">
+    <div class="kpi"><div class="l">Total invested (allotted)</div><div class="v">${kr(tInv)}</div></div>
+    <div class="kpi"><div class="l">Booked profit</div><div class="v ${pnlCls(tBook)}">${pnlTxt(tBook)}</div><div class="s">${tInv?((tBook)/tInv*100).toFixed(1)+'% on invested':''}</div></div>
+    <div class="kpi"><div class="l">Open positions value</div><div class="v">${kr(tOpen)}</div><div class="s">unsold allotment shares at CMP</div></div>
+    <div class="kpi"><div class="l">Unrealized P&L</div><div class="v ${pnlCls(tUnreal)}">${pnlTxt(tUnreal)}</div></div>
+    <div class="kpi"><div class="l">Overall</div><div class="v ${pnlCls(tBook+tUnreal)}">${pnlTxt(tBook+tUnreal)}</div></div>
+  </div>
+  <div class="info">💡 On listing day: edit the IPO and set <b>CMP</b> → unrealized P&L updates instantly. When you sell, enter <b>sell qty + avg price</b> in Applications → booked profit locks in.</div>
+  <div class="card"><h3>Allotment positions <small>(per account)</small></h3>
+  <div style="overflow:auto"><table><thead><tr>
+    <th>IPO</th><th>Account</th><th>Allotted</th><th>Cost/sh</th><th>Invested</th><th>CMP</th><th>Sold</th><th>Booked P&L</th><th>Open qty</th><th>Unrealized</th><th>Total</th>
+  </tr></thead><tbody>${rowsH||'<tr><td colspan="11" class="mut">No allotments yet — when you win one, it shows up here.</td></tr>'}</tbody></table></div></div>`;
+}
+
+// ---------- alerts ----------
+let seenAlerts=new Set(JSON.parse(localStorage.getItem('seenAlerts')||'[]'));
+let notifOn=localStorage.getItem('notifOn')==='1';
+async function loadAlerts(){
+  try{
+    const r=await api('/api/alerts');
+    document.getElementById('alert-ts').textContent='As of '+r.ts+' • auto-refreshes every minute';
+    const list=document.getElementById('alert-list');
+    const icon={mandate:'💳',refund:'💸',allotment:'🔍',listing:'🔔',listing_soon:'📅',tpin:'🔑'};
+    list.innerHTML=(r.alerts.length?r.alerts.map(a=>{
+      const key=a.kind+'|'+a.title+'|'+a.detail;
+      return `<div class="alert-row sev-${a.sev}">
+        <b>${icon[a.kind]||'•'} ${esc(a.title)}</b><br><span class="mut">${esc(a.detail)}</span>
+        ${a.ipo_id?`<div style="margin-top:6px"><button class="btn sm ghost" onclick="toggleAlerts();goApps(${a.ipo_id})">Open</button></div>`:''}
+      </div>`;}).join(''):'<div class="mut">All clear 🎉 Nothing needs attention.</div>');
+    const fresh=r.alerts.filter(a=>!seenAlerts.has(a.kind+'|'+a.title+'|'+a.detail));
+    const bc=document.getElementById('bell-count');
+    bc.style.display=fresh.length?'block':'none';bc.textContent=fresh.length;
+    if(notifOn&&'Notification'in window&&Notification.permission==='granted'){
+      fresh.filter(a=>a.sev==='high').forEach(a=>new Notification(a.title,{body:a.detail}));
+    }
+  }catch(e){}
+  updateNotifBtn();
+}
+function updateNotifBtn(){const b=document.getElementById('notif-btn');if(!b)return;
+  b.textContent=notifOn?'🔔 Phone alerts ON':'🔔 Enable phone alerts';
+  b.style.color=notifOn?'var(--grn)':'';}
+function _b64u8(s){const p='='.repeat((4-s.length%4)%4);const b=atob((s+p).replace(/-/g,'+').replace(/_/g,'/'));const a=new Uint8Array(b.length);for(let i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a;}
+window.enableNotifs=async()=>{
+  if(!('Notification'in window))return toast('This browser has no notification support',1);
+  if(localStorage.getItem('notifOn')==='1'){localStorage.setItem('notifOn','0');notifOn=false;
+    toast('Phone alerts off');return updateNotifBtn();}
+  if(Notification.permission!=='granted')await Notification.requestPermission();
+  if(Notification.permission!=='granted'){toast('Permission denied — allow notifications for this site in Chrome settings',1);return updateNotifBtn();}
+  localStorage.setItem('notifOn','1');notifOn=true;
+  try{
+    const reg=await navigator.serviceWorker.ready;
+    const vk=await api('/api/push/vapid');
+    const sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:_b64u8(vk.key)});
+    await api('/api/push/subscribe','POST',{subscription:sub.toJSON()});
+    toast('Phone alerts ON — notifications arrive even when the app is closed ✓');
+  }catch(e){toast('Live alerts ON in-app; background push failed: '+e.message,1);}
+  updateNotifBtn();};
+window.toggleAlerts=()=>{
+  const d=document.getElementById('alert-drawer');d.classList.toggle('show');
+  if(d.classList.contains('show')){ // mark all seen
+    api('/api/alerts').then(r=>{r.alerts.forEach(a=>seenAlerts.add(a.kind+'|'+a.title+'|'+a.detail));
+      localStorage.setItem('seenAlerts',JSON.stringify([...seenAlerts].slice(-500)));
+      document.getElementById('bell-count').style.display='none';});}};
+setInterval(loadAlerts,60000);setTimeout(loadAlerts,1500);
+
+// ---------- modal ----------
+function openModal(html){document.getElementById('modal').innerHTML=html;
+  document.getElementById('modal-bg').classList.add('show');}
+window.closeModal=()=>document.getElementById('modal-bg').classList.remove('show');
+document.getElementById('modal-bg').addEventListener('click',e=>{if(e.target.id==='modal-bg')closeModal();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+
+refresh().catch(e=>toast('Failed to load: '+e.message,1));
+if('serviceWorker'in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(()=>{});
+  // auto-reload once when a new service worker takes over (picks up app updates itself)
+  let _swReloaded=false;
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{if(_swReloaded)return;_swReloaded=true;location.reload();});
+}
+</script>
+</body>
+</html>
