@@ -1192,8 +1192,25 @@ else:
     except Exception:
         pass  # ephemeral filesystems (e.g. Render free) — env/default still work
 
-_PASSCODE = os.environ.get("PASSCODE", CONF["passcode"]).strip()
-_AUTH_TOKEN = hashlib.sha256((_PASSCODE + "-ipo-center").encode()).hexdigest()[:48]
+_ENV_PASSCODE = os.environ.get("PASSCODE", "").strip()
+
+
+def _passcode() -> str:
+    """Resolution: PASSCODE env (ops-pinned) > kv (user-changed via app, backed
+    up to GitHub so it survives redeploys) > config file/default."""
+    if _ENV_PASSCODE:
+        return _ENV_PASSCODE
+    try:
+        k = kv_get("app_passcode")
+        if k:
+            return k
+    except Exception:
+        pass
+    return CONF["passcode"]
+
+
+def _auth_token() -> str:
+    return hashlib.sha256((_passcode() + "-ipo-center").encode()).hexdigest()[:48]
 
 UNLOCK_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>IPO Center — Unlock</title>
@@ -1205,7 +1222,8 @@ button{background:#4f8cff;border:none;color:#fff;border-radius:10px;padding:12px
 <div class="box"><div style="font-size:38px">🔒</div><h2 style="font-size:17px;margin:10px 0 4px">IPO Command Center</h2>
 <p style="color:#8b9bb5;font-size:13px">Enter your 6-digit passcode</p>
 <input id="c" inputmode="numeric" maxlength="6" autocomplete="off" autofocus>
-<button onclick="go()">Unlock</button><div class="err" id="e"></div></div>
+<button onclick="go()">Unlock</button><div class="err" id="e"></div>
+<p style="color:#8b9bb5;font-size:11px;margin-top:14px">Forgot it? If you set a PASSCODE in your hosting dashboard, change it there. Otherwise check the hosting logs for the line "FIRST-RUN PASSCODE".</p></div>
 <script>
 const go=async()=>{const r=await fetch('/api/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:document.getElementById('c').value})});
 if(r.ok)location.href='/';else{let m='Wrong passcode — try again';try{const j=await r.json();if(j.detail)m=j.detail;}catch(_){}document.getElementById('e').textContent=m;}};
@@ -1216,7 +1234,7 @@ PUBLIC_PATHS = {"/manifest.json", "/sw.js", "/favicon.ico", "/api/unlock", "/hea
 
 
 def _authed(req) -> bool:
-    return secrets.compare_digest(req.cookies.get("ipo_auth") or "", _AUTH_TOKEN)
+    return secrets.compare_digest(req.cookies.get("ipo_auth") or "", _auth_token())
 
 
 @app.middleware("http")
@@ -1268,7 +1286,7 @@ def unlock(request: Request, b: dict = Body(...)):
     if now < until:
         mins = max(1, int((until - now + 59) // 60))
         raise HTTPException(429, f"Too many wrong attempts — locked. Try again in {mins} min.")
-    if not secrets.compare_digest(str(b.get("code", "")).strip(), _PASSCODE):
+    if not secrets.compare_digest(str(b.get("code", "")).strip(), _passcode()):
         _global_fails.append(now)
         _global_fails[:] = [t for t in _global_fails if now - t < 600]
         if len(_global_fails) >= 40:
@@ -1287,10 +1305,26 @@ def unlock(request: Request, b: dict = Body(...)):
     _unlock_fails.pop(ip, None)
     _unlock_until.pop(ip, None)
     resp = JSONResponse({"ok": True})
-    resp.set_cookie("ipo_auth", _AUTH_TOKEN, max_age=30 * 86400,
+    resp.set_cookie("ipo_auth", _auth_token(), max_age=30 * 86400,
                     httponly=True, samesite="lax",
                     secure=(request.url.scheme == "https"))
     return resp
+
+
+@app.post("/api/passcode")
+def change_passcode(b: dict = Body(...)):
+    """In-app passcode change (survives redeploys via the GitHub backup)."""
+    if _ENV_PASSCODE:
+        raise HTTPException(400, "passcode is pinned by the server's PASSCODE setting — change it in the hosting dashboard instead")
+    cur = str(b.get("current", "")).strip()
+    new = str(b.get("new", "")).strip()
+    if not secrets.compare_digest(cur, _passcode()):
+        raise HTTPException(403, "current passcode is wrong")
+    if not re.fullmatch(r"\d{6}", new):
+        raise HTTPException(400, "new passcode must be exactly 6 digits")
+    kv_set("app_passcode", new)
+    schedule_backup()
+    return {"ok": True}
 
 
 @app.get("/healthz")
