@@ -59,3 +59,11 @@ restarts. With them, it auto-saves and self-restores after every change.)*
 - It never applies for you, never sells, never touches your money — you apply in your
   broker app as usual; this is your tracker and command center.
 - It needs only PAN / CDSL BO ID (public registrar data) — never broker passwords.
+
+---
+
+## 🔑 Forgot your passcode?
+- **You set PASSCODE during deploy?** Render Dashboard → your service → **Environment** → set `PASSCODE` to a new 6-digit number → Save. It redeploys in ~3 min; data restores automatically.
+- **You skipped PASSCODE?** Render Dashboard → your service → **Logs** → find the line `FIRST-RUN PASSCODE ... 123456` — that number opens the app.
+- **Already inside the app?** Dashboard tab → **🔑 App passcode** card → change it yourself; it's saved permanently, even across updates.
+- The lock screen itself shows these hints, and wrong guesses only lock you out for 5 minutes.
