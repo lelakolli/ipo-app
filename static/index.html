@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<script>try{if(localStorage.getItem("ic-theme")==="light")document.documentElement.dataset.theme="light";}catch(_){}</script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0b1220">
@@ -16,6 +17,13 @@
   --bg:#0b1220; --card:#121b2e; --card2:#182339; --line:#243150;
   --txt:#e6ecf5; --mut:#8b9bb5; --acc:#4f8cff; --grn:#22c55e; --red:#ef4444;
   --amb:#f59e0b; --prp:#a78bfa;
+  --input:var(--input); --hover:var(--hover); --info-bg:#12203a; --info-line:#2c4b8a; --info-txt:#bcd3ff;
+}
+:root[data-theme=light]{
+  --bg:#f1f4f9; --card:#ffffff; --card2:#eef1f6; --line:#d8dee9;
+  --txt:#16233a; --mut:#5c6c84; --acc:#2563eb; --grn:#16a34a; --red:#dc2626;
+  --amb:#d97706; --prp:#7c3aed;
+  --input:#f4f6fa; --hover:#e9eef7; --info-bg:#e7efff; --info-line:#b9cff5; --info-txt:#1e3a66;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--txt);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;font-size:14px}
@@ -46,9 +54,9 @@ main{padding:20px 22px;max-width:1500px;margin:0 auto}
 .card h3 small{color:var(--mut);font-weight:400}
 table{width:100%;border-collapse:collapse}
 th{color:var(--mut);font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
-td{padding:8px 9px;border-bottom:1px solid #1a2438;vertical-align:middle}
-tr:hover td{background:#141f36}
-input,select,textarea{background:#0e1730;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:7px 10px;font-size:13px;font-family:inherit}
+td{padding:8px 9px;border-bottom:1px solid var(--line);vertical-align:middle}
+tr:hover td{background:var(--hover)}
+input,select,textarea{background:var(--input);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:7px 10px;font-size:13px;font-family:inherit}
 input:focus,select:focus{outline:none;border-color:var(--acc)}
 input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .btn{background:var(--acc);border:none;color:#fff;border-radius:9px;padding:8px 15px;font-size:13px;font-weight:600;cursor:pointer}
@@ -60,6 +68,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .chip{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11.5px;font-weight:650;white-space:nowrap}
 .c-open{background:#123a2a;color:#4ade80}.c-upcoming{background:#1b2a4a;color:#7aa5ff}
 .c-result_pending{background:#3a2c12;color:#fbbf24}.c-allotment_done{background:#2a2440;color:#c4b5fd}
+.tpill{flex:0 0 auto;display:flex;gap:9px;align-items:center;background:var(--input);border:1px solid var(--line);border-radius:13px;padding:9px 13px;cursor:pointer}.tpill.neg{border-color:#5c2128}
 .c-listed{background:#12303f;color:#67e8f9}.c-closed{background:#2a2f3a;color:#9aa7bd}
 .pos{color:var(--grn)}.neg{color:var(--red)}.mut{color:var(--mut)}
 .row-actions{display:flex;gap:6px;flex-wrap:wrap}
@@ -79,9 +88,9 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .toolbar select{min-width:280px}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 @media(max-width:900px){.two{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
-.info{background:#12203a;border:1px solid #2c4b8a;border-radius:11px;padding:11px 14px;font-size:12.5px;color:#bcd3ff;margin-bottom:14px;line-height:1.5}
+.info{background:var(--info-bg);border:1px solid var(--info-line);border-radius:11px;padding:11px 14px;font-size:12.5px;color:var(--info-txt);margin-bottom:14px;line-height:1.5}
 a{color:var(--acc)}
-.pbar{height:6px;background:#1a2438;border-radius:4px;overflow:hidden}
+.pbar{height:6px;background:var(--line);border-radius:4px;overflow:hidden}
 .pbar div{height:100%;background:var(--acc)}
 h2.sec{font-size:15px;margin:22px 0 10px;color:var(--txt)}
 select.mini,input.mini{padding:4px 7px;font-size:12px;border-radius:6px}
@@ -121,6 +130,8 @@ input.wide{width:150px}
     <button data-tab="accounts">Accounts</button>
     <button data-tab="pnl">P&amp;L</button>
   </nav>
+  <button class="bellbtn themebtn" id="themebtn" onclick="toggleTheme()" title="Switch dark / light">☀️</button>
+  <button class="bellbtn" onclick="logout()" title="Log out on this device">⏻</button>
 </header>
 <main>
   <section id="tab-dash"></section>
@@ -142,11 +153,19 @@ input.wide{width:150px}
   </div>
   <div class="mut" style="font-size:11px;margin-bottom:8px" id="alert-ts"></div>
   <div id="alert-list"></div>
+  <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <b style="font-size:12.5px">🔔 Notification switches</b>
+      <span class="mut" style="font-size:10.5px">saved on server • applies to all your devices</span>
+    </div>
+    <div id="notif-prefs" class="mut" style="font-size:12px;padding-top:6px">loading…</div>
+  </div>
 </div>
 <div id="toast"></div>
 
 <script>
 let S={accounts:[],ipos:[],applications:[],today:''};
+let applyCheckMode=false;
 let curTab='dash', selIpo=null;
 
 // ---------- utils ----------
@@ -215,10 +234,10 @@ window.drawMarket=()=>{
     &nbsp;|&nbsp; ${stateDot('verified')} 2 sources agree &nbsp;${stateDot('single')} 1 source &nbsp;${stateDot('diverged')} sources differ &nbsp;•&nbsp; a number that fails the double-check is <b>not</b> shown — the last verified value stays.
   </div>
   ${mktSub==='gmp'?`<div class="card"><h3>💹 GMP board <small>— grey market premium & expected listing</small></h3>
-    <div style="overflow-x:auto"><table><thead><tr><th style="text-align:left">IPO</th><th>GMP ₹</th><th>Est listing ₹</th><th>Gain %</th><th>Dates</th><th>Type</th><th>Status</th><th>Source ts</th></tr></thead><tbody>
-    ${g.map(r=>`<tr><td style="text-align:left"><b>${esc(r.name)}</b></td><td>${r.gmp!=null?num(r.gmp):'—'}</td>
+    <div style="overflow-x:auto"><table><thead><tr><th style="text-align:left">IPO</th><th>GMP ₹</th><th>Trend</th><th>Est listing ₹</th><th>Gain %</th><th>Dates</th><th>Type</th><th>Status</th><th>Source ts</th></tr></thead><tbody>
+    ${g.map(r=>`<tr><td style="text-align:left"><b>${esc(r.name)}</b></td><td>${r.gmp!=null?num(r.gmp):'—'}</td><td>${esc(r.trend||'')}</td>
       <td>${r.est_listing!=null?num(r.est_listing):'—'}</td><td class="${(r.est_pct||0)>0?'pos':'mut'}">${r.est_pct!=null?num(r.est_pct)+'%':'—'}</td>
-      <td class="mut">${esc(r.dates_txt||'')}</td><td class="mut">${esc(r.board||'')}</td><td>${esc(r.status||'')}</td><td class="mut">${esc(r.updated||'')}</td></tr>`).join('')||'<tr><td colspan="8" class="mut">no board data yet</td></tr>'}
+      <td class="mut">${esc(r.dates_txt||'')}</td><td class="mut">${esc(r.board||'')}</td><td>${esc(r.status||'')}</td><td class="mut">${esc(r.updated||'')}</td></tr>`).join('')||'<tr><td colspan="9" class="mut">no board data yet</td></tr>'}
     </tbody></table></div>
     <div class="mut" style="font-size:11.5px;margin-top:6px">Kostak &amp; Subject-to-Sauda are published by grey-market trackers (InvestorGain) only for hot issues — see the Per-IPO view; when unpublished the app shows —.</div>
     </div>`:''}
@@ -229,7 +248,7 @@ window.drawMarket=()=>{
     <div class="mut" style="font-size:11.5px;margin-top:6px">sHNI/bHNI split comes from the IPO Ji feed — see the Per-IPO view for the full break-up.</div>
     </div>`:''}
   ${mktSub==='ipo'?`<div class="card"><h3>🔎 Per-IPO numbers</h3>
-    <select id="mkt-pick" class="wide" style="max-width:100%;padding:9px;border-radius:9px;background:#0e1730;color:var(--txt);border:1px solid var(--line)" onchange="mktSnapId=this.value;mktSnap=null;drawIpoSnap()">
+    <select id="mkt-pick" class="wide" style="max-width:100%;padding:9px;border-radius:9px;background:var(--input);color:var(--txt);border:1px solid var(--line)" onchange="mktSnapId=this.value;mktSnap=null;drawIpoSnap()">
       <option value="">— pick an IPO —</option>
       ${S.ipos.map(i=>`<option value="${i.id}" ${+mktSnapId===i.id?'selected':''}>${esc(i.name)}</option>`).join('')}
     </select>
@@ -240,9 +259,9 @@ window.drawMarket=()=>{
     ${Object.entries(ver).filter(([k])=>k!=='at').map(([k,v])=>`<b>${esc(k)}</b>: ${esc(Array.isArray(v)?(v.join(' • ')||'none'):String(v))}<br>`).join('')||'—'}
     </div>
     <h3 style="margin-top:14px">👁 Watch-list (auto-detects new IPOs)</h3>
-    ${(MKT.watch||[]).map(w=>`<div style="padding:6px 0;border-bottom:1px solid #1a2438"><b>${esc(w.label)}</b> — ${w.found?`<span class="pos">PUBLISHED as “${esc(w.found.name)}” (${esc(w.found.at)})</span>`:'<span class="amb">not published by sources yet — the engine checks every 30 min and adds it automatically the moment it appears</span>'}</div>`).join('')||'<div class="mut">nothing watched</div>'}
+    ${(MKT.watch||[]).map(w=>`<div style="padding:6px 0;border-bottom:1px solid var(--line)"><b>${esc(w.label)}</b> — ${w.found?`<span class="pos">PUBLISHED as “${esc(w.found.name)}” (${esc(w.found.at)})</span>`:'<span class="amb">not published by sources yet — the engine checks every 30 min and adds it automatically the moment it appears</span>'}</div>`).join('')||'<div class="mut">nothing watched</div>'}
     <div class="mut" style="font-size:11.5px;margin-top:10px">If all three sources go down at once, the last verified numbers stay on screen with their timestamps — nothing silently turns to 0.</div>
-    <button class="btn sm ghost" style="margin-top:10px" onclick="api('/api/market/verify').then(()=>{toast('Deep verification done');MKT=null;drawMarket();})">Run deep verification now</button>
+    <button class="btn sm ghost" style="margin-top:10px" onclick="api('/api/market/verify').then(()=>{toast('Verification started — updating in ~45s…');setTimeout(()=>loadMkt(false).then(()=>{if(curTab==='market')drawMarket();}),45000);})">Run deep verification now</button>
   </div>`:''}`;
   if(mktSub==='ipo'&&mktSnapId&&!mktSnap)drawIpoSnap();
 };
@@ -313,8 +332,28 @@ function renderDash(){
     const total=S.accounts.filter(a=>a.active).length;
     if(applied<total)acts.push({t:'Not all accounts applied',d:`<b>${esc(i.name)}</b> — applied ${applied}/${total} (closes ${fd(i.close_date)})`,act:`goApps(${i.id})`});});
 
+  // 📌 TODAY strip — one-glance, time-critical items with tap-to-open
+  const pills=[];
+  S.ipos.filter(i=>i.status==='open'&&i.close_date===S.today).forEach(i=>
+    pills.push({ic:'⏰',t:`<b>${esc(i.name)}</b> closes today`,s:`GMP ₹${num(i.gmp||0)} • apply by ~1 PM`,cls:'neg',act:`goApps(${i.id})`}));
+  S.ipos.filter(i=>i.open_date===S.today&&i.status==='upcoming').forEach(i=>
+    pills.push({ic:'🚀',t:`<b>${esc(i.name)}</b> opens today`,s:i.gmp?`GMP ₹${num(i.gmp)}`:'',act:`goApps(${i.id})`}));
+  S.ipos.filter(i=>i.allotment_date&&i.status==='result_pending'&&i.allotment_date<=S.today).forEach(i=>
+    pills.push({ic:'🎯',t:`<b>${esc(i.name)}</b> allotment due`,s:'tap to auto-check',act:`goApps(${i.id},1)`}));
+  S.ipos.filter(i=>i.listing_date===S.today).forEach(i=>{
+    const sh=S.applications.filter(a=>a.ipo_id===i.id&&a.allotment==='allotted').reduce((s,a)=>s+(a.allotted_qty||0),0);
+    pills.push({ic:'🔔',t:`<b>${esc(i.name)}</b> lists today`,s:sh?`${sh} sh held${i.cmp?` • CMP ₹${num(i.cmp)}`:''}`:(i.gmp?`last GMP ₹${num(i.gmp)}`:''),act:`goApps(${i.id})`});});
+  const rfp=apps.filter(a=>a.allotment==='not_allotted'&&a.refund==='pending');
+  if(rfp.length)pills.push({ic:'🔓',t:`${rfp.length} refunds pending`,s:kr(rfp.reduce((s,a)=>s+a.amount,0))+' to unblock',act:`goApps(${rfp[0].ipo_id})`});
+  const mp=apps.filter(a=>a.mandate_status==='pending'&&(ipoById(a.ipo_id)||{}).status==='open');
+  if(mp.length)pills.push({ic:'⏳',t:`${mp.length} UPI mandates waiting`,s:'approve on the phones',cls:'neg'});
+  const todayStrip=pills.length?`<div class="mut" style="font-size:11.5px;font-weight:700;letter-spacing:.6px;margin:4px 0 6px">📌 TODAY</div>
+    <div style="display:flex;gap:8px;overflow-x:auto;padding:0 0 10px;-webkit-overflow-scrolling:touch">${
+    pills.map(p=>`<div class="tpill ${p.cls||''}" ${p.act?`onclick="${p.act}"`:''}><span style="font-size:20px">${p.ic}</span><span><div style="font-size:13px;font-weight:600;white-space:nowrap">${p.t}</div><div class="mut" style="font-size:11px;white-space:nowrap">${p.s}</div></span></div>`).join('')}</div>`:'';
+
   el.innerHTML=`
   <div class="info">💡 Allotment is <b>PAN-based</b> — keep one unique PAN per account or exchanges reject duplicate bids. This app never asks for your demat/broker passwords; allotment checks use only PAN / CDSL BO ID (public registrar data).</div>
+  ${todayStrip}
   <div class="grid-kpi">
     <div class="kpi"><div class="l">IPOs open now</div><div class="v">${openIpos.length}</div><div class="s">${S.ipos.filter(i=>i.status==='upcoming').length} upcoming</div></div>
     <div class="kpi"><div class="l">Capital blocked</div><div class="v">${kr(blocked)}</div><div class="s">mandates approved, results awaited</div></div>
@@ -325,14 +364,14 @@ function renderDash(){
   </div>
   <div class="two">
     <div class="card"><h3>⚡ Needs your action <small>(${acts.length})</small></h3>
-      ${acts.length?acts.map(a=>`<div style="padding:7px 0;border-bottom:1px solid #1a2438;display:flex;justify-content:space-between;gap:10px;align-items:center">
+      ${acts.length?acts.map(a=>`<div style="padding:7px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:center">
         <div><span class="${a.cls||''}" style="font-weight:600">${a.t}</span><br><span class="mut">${a.d}</span></div>
         ${a.act?`<button class="btn sm ghost" onclick="${a.act}">Open</button>`:''}</div>`).join('')
       :'<div class="mut">All clear 🎉</div>'}
     </div>
     <div class="card"><h3>🟢 Open / upcoming mainboard IPOs</h3>
       ${S.ipos.filter(i=>['open','upcoming'].includes(i.status)&&i.board==='Mainboard').map(i=>`
-      <div style="padding:8px 0;border-bottom:1px solid #1a2438;display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <div style="padding:8px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:8px">
         <div><b>${esc(i.name)}</b> ${i.gmp?`<span class="chip c-listed" title="Grey market premium">GMP ₹${num(i.gmp)}</span>`:''} ${i.sub&&i.sub.total!=null?`<span class="chip" title="Live subscription — QIB ${i.sub.qib??'—'}× • sHNI ${i.sub.shni??'—'}× • bHNI ${i.sub.bhni??'—'}× • Retail ${i.sub.rii??'—'}×">SUB ${i.sub.total}×</span>`:''}<br>
         <span class="mut">${fd(i.open_date)} → ${fd(i.close_date)} ${i.price_max?`• ₹${num(i.price_min)}–${num(i.price_max)} • lot ${num(i.lot_size)}`:'• details not set — edit IPO'}</span></div>
         <button class="btn sm" onclick="goApps(${i.id})">Apply / track</button>
@@ -358,8 +397,8 @@ function renderDash(){
   <div class="card">
     <h3>🔑 App passcode</h3>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <input id="pc-cur" inputmode="numeric" maxlength="6" placeholder="current 6-digit" style="width:130px;background:#0e1730;border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
-      <input id="pc-new" inputmode="numeric" maxlength="6" placeholder="new 6-digit" style="width:130px;background:#0e1730;border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
+      <input id="pc-cur" inputmode="numeric" maxlength="6" placeholder="current 6-digit" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
+      <input id="pc-new" inputmode="numeric" maxlength="6" placeholder="new 6-digit" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
       <button class="btn sm" onclick="changePass()">Change passcode</button>
     </div>
     <div class="mut" style="font-size:11.5px;margin-top:6px">the new passcode is saved permanently (it survives app updates and restarts). If your host pinned a PASSCODE there, change it in the host dashboard instead.</div>
@@ -392,14 +431,16 @@ window.goApps=(id,check)=>{selIpo=id;curTab='apps';
 const STATUS_LABEL={open:'OPEN',upcoming:'UPCOMING',result_pending:'RESULT AWAITED',allotment_done:'ALLOTMENT DONE',listed:'LISTED'};
 function renderIpos(){
   const el=document.getElementById('tab-ipos');
-  el.innerHTML=`
-  <div class="toolbar">
-    <button class="btn" onclick="ipoModal()">+ Add IPO</button>
-    <button class="btn ghost" id="syncbtn" onclick="syncLive()">🔄 Sync live IPO list</button>
-    <button class="btn ghost" id="gmpbtn" onclick="refreshGmp()">💹 Refresh GMP</button>
-    <span class="mut">GMP + subscription auto-refresh every 15 min (Chittorgarh + IPO Ji). CMP auto-fetches from listing day onwards.</span>
-  </div>
-  ${S.ipos.map(i=>{const minAmt=i.price_max&&i.lot_size?i.price_max*i.lot_size:0;
+  const archivable=i=>{
+    if(!i.listing_date)return false;
+    const age=(new Date(S.today)-new Date(i.listing_date))/86400000;
+    if(age<10)return false;   // keep recent listings visible
+    const as=S.applications.filter(a=>a.ipo_id===i.id&&a.applied);
+    return !as.some(a=>a.allotment==='allotted'&&(a.allotted_qty-(a.sell_qty||0))>0)
+        && !as.some(a=>a.refund==='pending')
+        && !as.some(a=>a.allotment==='pending');
+  };
+  const ipocard=i=>{const minAmt=i.price_max&&i.lot_size?i.price_max*i.lot_size:0;
     const s=i.sub||{};
     return `<div class="card" style="margin-bottom:10px">
     <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
@@ -424,7 +465,18 @@ function renderIpos(){
       <button class="btn sm ghost" onclick="ipoModal(${i.id})">Edit</button>
       <button class="btn sm danger" onclick="delIpo(${i.id},'${esc(i.name)}')">✕</button>
     </div>
-  </div>`;}).join('')||'<div class="card mut">No IPOs yet — add manually or Sync live.</div>'}`;
+  </div>`;};
+  const live=S.ipos.filter(i=>!archivable(i));
+  const arc=S.ipos.filter(archivable).sort((a,b)=>(b.listing_date||'').localeCompare(a.listing_date||''));
+  el.innerHTML=`
+  <div class="toolbar">
+    <button class="btn" onclick="ipoModal()">+ Add IPO</button>
+    <button class="btn ghost" id="syncbtn" onclick="syncLive()">🔄 Sync live IPO list</button>
+    <button class="btn ghost" id="gmpbtn" onclick="refreshGmp()">💹 Refresh GMP</button>
+    <span class="mut">GMP + subscription auto-refresh every 15 min (Chittorgarh + IPO Ji). CMP auto-fetches from listing day onwards. Settled IPOs auto-move to Archive after 10 days.</span>
+  </div>
+  ${live.map(ipocard).join('')||'<div class="card mut">No IPOs yet — add manually or Sync live.</div>'}
+  ${arc.length?`<details style="margin-top:10px"><summary class="card" style="cursor:pointer;font-weight:600">🗃 Archive (${arc.length}) — listed, sold out & settled. Tap to expand.</summary><div style="height:8px"></div>${arc.map(ipocard).join('')}</details>`:''}`;
 }
 window.delIpo=async(id,name)=>{if(!confirm(`Delete "${name}" and all its application rows?`))return;
   await api('/api/ipos/'+id,'DELETE');toast('Deleted');refresh();};
@@ -538,6 +590,8 @@ function renderApps(){
     const dis=ap.applied?'':'disabled';
     const cost=ap.allotted_qty>0?ap.amount/ap.allotted_qty:0;
     const profit=bookedPnl(ap)+unrealPnl(ap,ipo);
+    const preListed=ap.allotment==='allotted'&&!(ipo.cmp>0)&&!(ap.sell_qty>0);
+    const estTot=preListed&&ipo.gmp>0?ipo.gmp*ap.allotted_qty:null;
     return `<tr data-acc="${a.id}">
     <td><b>${esc(a.holder)}</b>${a.active?'':' <span class="chip c-closed">inactive</span>'}<br><span class="mut" style="font-size:11px">${esc(a.pan||a.cdsl||'no PAN/BO ID')}</span></td>
     <td><input type="checkbox" class="f-applied" ${ap.applied?'checked':''}></td>
@@ -545,7 +599,7 @@ function renderApps(){
     <td class="upi-def"><span class="mut" style="font-size:11.5px" title="This account's default UPI ID (set in Accounts tab)">${a.upi?esc(a.upi):'<span class="neg">not set</span>'}</span>
       ${a.upi?`<button type="button" class="btn sm ghost" style="padding:1px 7px;font-size:11px;margin-left:3px" title="Copy default into the Used UPI field" onclick="copyDefUpi(this)" ${dis}>⇐ use</button>`:''}</td>
     <td><input class="mini wide f-upi ${(ap.upi&&a.upi&&ap.upi!==a.upi)?'upi-diff':''}" data-def="${esc(a.upi||'')}" value="${esc(ap.upi||a.upi||'')}" title="UPI ID actually used for this application — amber highlight = different from default" ${dis}></td>
-    <td class="f-pnl ${pnlCls(profit)}" style="white-space:nowrap">${ap.allotment==='allotted'?pnlTxt(profit)+(cost?`<br><span class="mut" style="font-size:11px">cost ₹${num(cost)}</span>`:''):'<span class="mut">—</span>'}</td>
+    <td class="f-pnl ${preListed?(estTot!=null?'pos':'mut'):pnlCls(profit)}" style="white-space:nowrap">${ap.allotment==='allotted'?(preListed?(estTot!=null?`est ${pnlTxt(estTot)}<br><span class="mut" style="font-size:11px">₹${num(cost+(ipo.gmp||0))}/sh expected (GMP)</span>`:'<span class="mut">— listing soon</span>'):pnlTxt(profit)+(cost?`<br><span class="mut" style="font-size:11px">cost ₹${num(cost)}</span>`:'')):'<span class="mut">—</span>'}</td>
     <td><input type="number" class="mini num f-aqty" style="width:70px" min="0" value="${ap.allotted_qty||''}" ${dis}></td>
     <td><input type="number" class="mini num f-lots" style="width:60px" min="0" value="${ap.lots||1}" ${dis}></td>
     <td><input type="number" class="mini num f-amount" step="0.01" value="${ap.amount||''}" ${dis}></td>
@@ -556,6 +610,31 @@ function renderApps(){
     <td><input type="number" class="mini num f-sprice" style="width:80px" step="0.01" value="${ap.sell_price||''}" ${dis}></td>
     </tr>`;}).join('');
   const applied=S.applications.filter(x=>x.ipo_id===ipo.id&&x.applied);
+  const pendRef=applied.filter(a=>a.refund==='pending');
+  const pendRefAmt=pendRef.reduce((s,a)=>s+(a.amount||0),0);
+  const allottedCnt=applied.filter(a=>a.allotment==='allotted').length;
+  if(applyCheckMode){
+    const tot=S.accounts.filter(a=>a.active).length;
+    el.innerHTML=`
+    <div class="toolbar">
+      <select id="ipo-sel" onchange="selIpo=+this.value;renderApps()">
+        ${S.ipos.map(i=>`<option value="${i.id}" ${i.id===ipo.id?'selected':''}>${esc(i.name)} (${STATUS_LABEL[i.status]||i.status})</option>`).join('')}
+      </select>
+      <button class="btn ghost" onclick="applyCheckMode=false;renderApps()">← Exit check mode</button>
+    </div>
+    <div class="card"><h3>✔ Apply-check — ${esc(ipo.name)} <small>${applied.length}/${tot} done • tap ✓ as you finish each Groww profile</small></h3>
+    ${accts.map(a=>{
+      const ap=appFor(ipo.id,a.id), done=ap&&ap.applied;
+      const amt=ipo.price_max&&ipo.lot_size?ipo.price_max*ipo.lot_size:0;
+      return `<div style="display:flex;align-items:center;gap:12px;padding:13px 12px;border:1px solid var(--line);border-radius:13px;margin-bottom:8px;${done?'opacity:.5':''}">
+        <div style="flex:1;min-width:0"><b style="font-size:16px">${esc(a.holder)}</b><br>
+          <span class="mut" style="font-size:12px">UPI: <code style="font-size:13px">${esc(a.upi||'not set')}</code>${ap&&ap.app_no?` • app ${esc(ap.app_no)}`:''}</span></div>
+        <div class="mut" style="font-size:12px;text-align:right">${amt?rs(amt):''}<br>${done?'<span class="pos" style="font-weight:700">✓ done</span>':'1 lot Retail'}</div>
+        <button class="btn ${done?'ghost':''}" style="min-width:66px" onclick="checkOne(${a.id})">${done?'Undo':'✓'}</button>
+      </div>`;}).join('')}
+    </div>`;
+    return;
+  }
   const uniqUpis=new Set(applied.map(x=>(x.upi||'').trim().toLowerCase()).filter(Boolean)).size;
   const blocked=applied.filter(a=>a.mandate_status==='approved'&&a.allotment==='pending').reduce((s,a)=>s+a.amount,0);
   const allot=applied.filter(a=>a.allotment==='allotted').length;
@@ -567,6 +646,10 @@ function renderApps(){
     </select>
     <button class="btn" onclick="applyAll()">⚡ Apply all active accounts</button>
     <button class="btn ghost" onclick="markAllMandates()" title="Mark mandate approved for every account in this IPO">✓ All mandates approved</button>
+    <button class="btn ghost" id="unblockbtn" onclick="unblockAllFunds()" title="One tap: every pending refund in this IPO → unblocked ✓${pendRef.length?` (${pendRef.length} waiting, ${kr(pendRefAmt)} will be released)`:''}">🔓 All funds unblocked${pendRef.length?` (${pendRef.length})`:''}</button>
+    ${allottedCnt?`<button class="btn" onclick="soldAllCmp()" title="Book EVERY allotted share as sold at CMP${ipo.cmp?` (₹${num(ipo.cmp)})`:''} — rows already fully sold are skipped">💰 Sold all @ CMP</button>
+    <button class="btn ghost" onclick="soldAllPrice()" title="Enter ONE sell price — books every allotted, unsold share at that price">Sell ₹ for all</button>`:''}
+    <button class="btn ghost" onclick="applyCheckMode=true;renderApps()" title="Simple tick-off view (big buttons) while applying in Groww">✔ Apply-check</button>
     <button class="btn warn" onclick="runAllotmentCheck()" id="chkbtn">🔍 Auto-check allotment (${esc(ipo.registrar)})</button>
     ${ipo.registrar_link?`<a class="btn ghost sm" href="${ipo.registrar_link}" target="_blank">🔗 Registrar page</a>`:''}
     <span class="mut">1 lot ≈ ${minAmt?rs(minAmt):'set price band + lot size'}</span>
@@ -627,11 +710,59 @@ window.applyAll=async()=>{
   if(!confirm(`Apply 1 lot in "${ipo.name}" for all ${active.length} active accounts${amt?` (~${rs(amt)} each, ${kr(amt*active.length)} total)`:''}?\nUPI auto-fills from each account's default.`))return;
   const r=await api(`/api/ipos/${selIpo}/apply`,'POST',{lots,category:'Retail'});
   toast(`Applied for ${r.applied} accounts ✔`);refresh();};
+window.toggleTheme=()=>{const el=document.documentElement;const light=el.dataset.theme!=='light';
+  el.dataset.theme=light?'light':'';
+  try{localStorage.setItem('ic-theme',light?'light':'dark');}catch(_){}
+  const b=document.getElementById('themebtn');if(b)b.textContent=light?'🌙':'☀️';};
+window.logout=async()=>{
+  if(!confirm('Log out of IPO Command Center on this device?'))return;
+  try{await api('/api/logout','POST',{});}catch(_){}
+  location.href='/';};
+window.dlPnl=async()=>{
+  try{
+    const r=await fetch('/api/export/pnl.csv',{credentials:'same-origin'});
+    if(!r.ok)throw new Error('http '+r.status);
+    const blob=await r.blob(),a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);a.download='ipo-pnl-'+S.today+'.csv';
+    document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(a.href);
+    toast('⬇ P&L CSV downloaded');
+  }catch(e){toast('Download failed — try again',1);}};
 window.markAllMandates=async()=>{
   const ipo=ipoById(selIpo);
   if(!confirm(`Mark UPI mandate APPROVED for every account in "${ipo.name}"?`))return;
   const r=await api(`/api/ipos/${selIpo}/mandates`,'POST',{status:'approved'});
   toast(`✓ ${r.updated} mandates marked approved`);refresh();};
+window.unblockAllFunds=async()=>{
+  const ipo=ipoById(selIpo);if(!ipo)return;
+  const pend=S.applications.filter(x=>x.ipo_id===ipo.id&&x.applied&&x.refund==='pending');
+  if(!pend.length)return toast('Nothing pending — all refunds for this IPO are already unblocked ✓');
+  const btn=document.getElementById('unblockbtn');if(btn)btn.disabled=true;
+  try{
+    const amt=pend.reduce((s,a)=>s+(a.amount||0),0);
+    const r=await api(`/api/ipos/${ipo.id}/funds_unblocked`,'POST',{});
+    toast(`🔓 ${r.unblocked} fund${r.unblocked===1?'':'s'} unblocked ✓ — ${kr(amt)} released`);
+  }finally{refresh();}};
+window.checkOne=async(accId)=>{
+  const ap=appFor(selIpo,accId);
+  const body={ipo_id:selIpo,account_id:accId,category:'Retail'};
+  if(ap&&ap.applied)body.applied=0;
+  else{body.applied=1;body.lots=1;}
+  await api('/api/applications','POST',body);
+  S=await api('/api/state');renderApps();};
+window.soldAllCmp=async()=>{
+  const ipo=ipoById(selIpo);if(!ipo)return;
+  if(!(ipo.cmp>0))return toast('CMP not set for this IPO yet — tap ↻ CMP on the IPOs tab first',1);
+  const n=S.applications.filter(a=>a.ipo_id===ipo.id&&a.allotment==='allotted'&&(a.allotted_qty-(a.sell_qty||0))>0).length;
+  if(!n)return toast('Nothing left to sell — every allotted row is already fully sold ✓');
+  if(!confirm(`Book ALL ${n} allotted row${n===1?'':'s'} of "${ipo.name}" as SOLD at CMP ₹${num(ipo.cmp)} each?`))return;
+  const r=await api(`/api/ipos/${ipo.id}/sold_all`,'POST',{});
+  toast(`💰 ${r.sold_rows} rows sold @ ₹${num(r.price)} — P&L locked ✓`);refresh();};
+window.soldAllPrice=async()=>{
+  const ipo=ipoById(selIpo);if(!ipo)return;
+  const p=prompt(`Sell price per share for ALL allotted rows of "${ipo.name}"?`,ipo.cmp||'');
+  if(!p||isNaN(+p)||+p<=0)return;
+  const r=await api(`/api/ipos/${ipo.id}/sold_all`,'POST',{price:+p});
+  toast(`💰 ${r.sold_rows} rows sold @ ₹${num(r.price)} — P&L locked ✓`);refresh();};
 window.runAllotmentCheck=async()=>{
   const btn=document.getElementById('chkbtn');btn.disabled=true;btn.textContent='Checking…';
   const box=document.getElementById('checkres');box.style.display='block';
@@ -672,6 +803,7 @@ function renderPnl(){
     <td class="${pnlCls(book+unrl)}" style="font-weight:700">${pnlTxt(book+unrl)}</td>
     </tr>`;}).join('');
   el.innerHTML=`
+  <div class="toolbar"><button class="btn ghost" onclick="dlPnl()">⬇ Download full P&L (CSV)</button><span class="mut">every application incl. blocked amounts & refunds — opens in Excel/Sheets</span></div>
   <div class="grid-kpi">
     <div class="kpi"><div class="l">Total invested (allotted)</div><div class="v">${kr(tInv)}</div></div>
     <div class="kpi"><div class="l">Booked profit</div><div class="v ${pnlCls(tBook)}">${pnlTxt(tBook)}</div><div class="s">${tInv?((tBook)/tInv*100).toFixed(1)+'% on invested':''}</div></div>
@@ -729,9 +861,35 @@ window.enableNotifs=async()=>{
     toast('Phone alerts ON — notifications arrive even when the app is closed ✓');
   }catch(e){toast('Live alerts ON in-app; background push failed: '+e.message,1);}
   updateNotifBtn();};
+const NOTIF_CATS=[
+ ['allotment','📢 Allotment results','the moment an allotment verdict is found'],
+ ['close_today','⏰ Closes today','morning reminder for IPOs closing today'],
+ ['mandate','⏳ Mandates pending','evening nag if UPI mandates are unapproved'],
+ ['listing','🔔 Listing tomorrow','evening heads-up with your expected position'],
+ ['gmp_swing','📈 GMP sharp moves',"≥20% jumps on IPOs you've applied in"],
+ ['high_alert','⚠️ Important alerts','data verification divergences & critical checks'],
+];
+let NP={};
+async function loadNotifPrefs(){
+  try{NP=await api('/api/notifications/prefs');}catch(e){return;}
+  const box=document.getElementById('notif-prefs');if(!box)return;
+  box.innerHTML=NOTIF_CATS.map(([k,t,d])=>{
+    const on=NP[k]!==false;
+    return `<div style="display:flex;align-items:center;gap:9px;padding:6px 0;border-bottom:1px dashed var(--line)">
+      <div style="flex:1"><b style="font-size:12.5px">${t}</b><br><span class="mut" style="font-size:10.5px">${d}</span></div>
+      <button class="btn sm ${on?'':'ghost'}" style="min-width:56px;${on?'':'color:var(--mut)'}" onclick="prefToggle('${k}')">${on?'ON':'OFF'}</button>
+    </div>`;}).join('');
+}
+window.prefToggle=async(k)=>{
+  const want=!(NP[k]!==false);
+  try{NP=await api('/api/notifications/prefs','POST',{[k]:want});}catch(e){return toast('Could not save — try again',1);}
+  loadNotifPrefs();
+  const lbl=(NOTIF_CATS.find(c=>c[0]===k)||[])[1]||k;
+  toast(`${lbl.replace(/^[^ ]+ /,'')}: ${NP[k]?'ON ✅':'OFF'}`);};
 window.toggleAlerts=()=>{
   const d=document.getElementById('alert-drawer');d.classList.toggle('show');
   if(d.classList.contains('show')){ // mark all seen
+    loadNotifPrefs();
     api('/api/alerts').then(r=>{r.alerts.forEach(a=>seenAlerts.add(a.kind+'|'+a.title+'|'+a.detail));
       localStorage.setItem('seenAlerts',JSON.stringify([...seenAlerts].slice(-500)));
       document.getElementById('bell-count').style.display='none';});}};

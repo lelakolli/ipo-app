@@ -1089,7 +1089,9 @@ def compute_alerts():
                         and (a["allotted_qty"] or 0) > (a["sell_qty"] or 0)]
             alerts.append({"sev": "high", "kind": "listing", "ipo_id": ipo["id"],
                            "title": f"🔔 {ipo['name']} lists today",
-                           "detail": f"CMP ₹{ipo['cmp'] or '?'}" +
+                           # keep detail STABLE (no CMP) — a changing detail makes
+                           # the dedupe key change and re-pushes every CMP tick
+                           "detail": "Opens ~10 AM — CMP auto-updates in the app" +
                                      (f" • open positions in {len(open_pos)} account(s)" if open_pos else "")})
             tpin = sorted({a["holder"] for a in open_pos if (a.get("auth_mode") or "") == "TPIN"})
             if tpin:
@@ -1185,8 +1187,10 @@ CONF_FILE = DATA / "config.json"
 if CONF_FILE.exists():
     CONF = json.loads(CONF_FILE.read_text())
 else:
-    CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}
-    print("[boot] FIRST-RUN PASSCODE (check Logs, or set PASSCODE env var):", CONF["passcode"], flush=True)
+    CONF = {"passcode": secrets.token_hex(3)}
+    print(f"[boot] FIRST-RUN PASSCODE: {CONF['passcode']} — find this in the hosting "
+          "logs, set your own via the PASSCODE environment variable, or change it "
+          "in-app (Dashboard → passcode card).", flush=True)
     try:
         CONF_FILE.write_text(json.dumps(CONF))
     except Exception:
@@ -1212,18 +1216,21 @@ def _passcode() -> str:
 def _auth_token() -> str:
     return hashlib.sha256((_passcode() + "-ipo-center").encode()).hexdigest()[:48]
 
-UNLOCK_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
+UNLOCK_HTML = """<!DOCTYPE html><html><head><script>try{if(localStorage.getItem("ic-theme")==="light")document.documentElement.dataset.theme="light";}catch(_){}</script><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>IPO Center — Unlock</title>
-<style>body{background:#0b1220;color:#e6ecf5;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-.box{background:#121b2e;border:1px solid #243150;border-radius:16px;padding:32px 28px;text-align:center;max-width:340px;width:90%}
-input{background:#0e1730;border:1px solid #243150;color:#e6ecf5;border-radius:10px;padding:12px;font-size:18px;width:100%;text-align:center;letter-spacing:6px;margin:14px 0;box-sizing:border-box}
-button{background:#4f8cff;border:none;color:#fff;border-radius:10px;padding:12px;width:100%;font-size:15px;font-weight:600;cursor:pointer}
-.err{color:#ef4444;font-size:12.5px;min-height:18px;margin-top:10px}</style></head><body>
+<style>
+:root{--bg:#0b1220;--card:#121b2e;--line:#243150;--txt:#e6ecf5;--mut:#8b9bb5;--acc:#4f8cff;--input:#0e1730;--red:#ef4444}
+:root[data-theme=light]{--bg:#f1f4f9;--card:#ffffff;--line:#d8dee9;--txt:#16233a;--mut:#5c6c84;--acc:#2563eb;--input:#f4f6fa;--red:#dc2626}
+body{background:var(--bg);color:var(--txt);font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:32px 28px;text-align:center;max-width:340px;width:90%}
+input{background:var(--input);border:1px solid var(--line);color:var(--txt);border-radius:10px;padding:12px;font-size:18px;width:100%;text-align:center;letter-spacing:6px;margin:14px 0;box-sizing:border-box}
+button{background:var(--acc);border:none;color:#fff;border-radius:10px;padding:12px;width:100%;font-size:15px;font-weight:600;cursor:pointer}
+.err{color:var(--red);font-size:12.5px;min-height:18px;margin-top:10px}</style></head><body>
 <div class="box"><div style="font-size:38px">🔒</div><h2 style="font-size:17px;margin:10px 0 4px">IPO Command Center</h2>
-<p style="color:#8b9bb5;font-size:13px">Enter your 6-digit passcode</p>
+<p style="color:var(--mut);font-size:13px">Enter your 6-digit passcode</p>
 <input id="c" inputmode="numeric" maxlength="6" autocomplete="off" autofocus>
 <button onclick="go()">Unlock</button><div class="err" id="e"></div>
-<p style="color:#8b9bb5;font-size:11px;margin-top:14px">Forgot it? If you set a PASSCODE in your hosting dashboard, change it there. Otherwise check the hosting logs for the line "FIRST-RUN PASSCODE".</p></div>
+<p style="color:var(--mut);font-size:11px;margin-top:14px">Forgot it? If you set a PASSCODE in your hosting dashboard, change it there. Otherwise check the hosting logs for the line "FIRST-RUN PASSCODE".</p></div>
 <script>
 const go=async()=>{const r=await fetch('/api/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:document.getElementById('c').value})});
 if(r.ok)location.href='/';else{let m='Wrong passcode — try again';try{const j=await r.json();if(j.detail)m=j.detail;}catch(_){}document.getElementById('e').textContent=m;}};
@@ -1308,6 +1315,15 @@ def unlock(request: Request, b: dict = Body(...)):
     resp.set_cookie("ipo_auth", _auth_token(), max_age=30 * 86400,
                     httponly=True, samesite="lax",
                     secure=(request.url.scheme == "https"))
+    return resp
+
+
+@app.post("/api/logout")
+def api_logout():
+    """Clear the auth cookie on this device — the lock screen appears on the
+       next page load. Other signed-in devices are unaffected."""
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("ipo_auth", httponly=True, samesite="lax")
     return resp
 
 
@@ -1516,13 +1532,23 @@ def create_ipo(b: dict = Body(...)):
 
 @app.put("/api/ipos/{iid}")
 def update_ipo(iid: int, b: dict = Body(...)):
+    # partial-friendly: only keys actually sent are written — a partial update
+    # can never blank the rest of the row.
+    cur_l = rows("SELECT * FROM ipos WHERE id=?", (iid,))
+    if not cur_l:
+        raise HTTPException(404, "ipo not found")
+    cur = cur_l[0]
+
+    def g(k):
+        return b[k] if k in b and b[k] is not None else cur.get(k)
+
     run("""UPDATE ipos SET name=?,registrar=?,registrar_ref=?,open_date=?,close_date=?,price_min=?,price_max=?,
            lot_size=?,allotment_date=?,listing_date=?,board=?,symbol=?,cmp=?,gmp=?,notes=? WHERE id=?""",
-        (b.get("name", "").strip(), b.get("registrar", "Other"), b.get("registrar_ref", ""),
-         b.get("open_date", ""), b.get("close_date", ""), float(b.get("price_min") or 0),
-         float(b.get("price_max") or 0), int(b.get("lot_size") or 0), b.get("allotment_date", ""),
-         b.get("listing_date", ""), b.get("board", "Mainboard"), b.get("symbol", ""),
-         float(b.get("cmp") or 0), float(b.get("gmp") or 0), b.get("notes", ""), iid))
+        (str(g("name") or "").strip(), str(g("registrar") or "Other"), str(g("registrar_ref") or ""),
+         g("open_date") or "", g("close_date") or "", float(g("price_min") or 0),
+         float(g("price_max") or 0), int(g("lot_size") or 0), g("allotment_date") or "",
+         g("listing_date") or "", g("board") or "Mainboard", g("symbol") or "",
+         float(g("cmp") or 0), float(g("gmp") or 0), g("notes") or "", iid))
     return {"ok": True}
 
 
@@ -1599,6 +1625,88 @@ def set_all_mandates(iid: int, b: dict = Body(...)):
     return {"ok": True, "updated": n}
 
 
+@app.post("/api/ipos/{iid}/funds_unblocked")
+def unblock_all_funds(iid: int):
+    """One tap: every pending refund for this IPO -> received (funds unblocked).
+       Only rows already waiting on a refund flip — allotted rows (money
+       debited) and undecided rows are never touched."""
+    with LOCK, get_db() as con:
+        cur = con.execute(
+            "UPDATE applications SET refund='received', "
+            "updated_at=datetime('now','localtime') "
+            "WHERE ipo_id=? AND applied=1 AND refund='pending'", (iid,))
+        con.commit()
+        n = cur.rowcount
+    if n:
+        schedule_backup()
+    return {"ok": True, "unblocked": n}
+
+
+@app.post("/api/ipos/{iid}/sold_all")
+def sold_all(iid: int, b: dict = Body(default={})):
+    """One tap: book every allotted, not-fully-sold share of this IPO at one
+       price (defaults to the IPO's CMP). Rows already fully sold are skipped."""
+    price = b.get("price")
+    ipo_l = rows("SELECT * FROM ipos WHERE id=?", (iid,))
+    if not ipo_l:
+        raise HTTPException(404, "ipo not found")
+    if price is None:
+        price = ipo_l[0].get("cmp") or 0
+    try:
+        price = float(price or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "bad price")
+    if price <= 0:
+        raise HTTPException(400, "no price given and CMP not set for this IPO")
+    with LOCK, get_db() as con:
+        cur = con.execute(
+            "UPDATE applications SET sell_qty=allotted_qty, sell_price=?, "
+            "sold_on=date('now','localtime'), updated_at=datetime('now','localtime') "
+            "WHERE ipo_id=? AND allotment='allotted' AND allotted_qty>COALESCE(sell_qty,0)",
+            (price, iid))
+        con.commit()
+        n = cur.rowcount
+    if n:
+        schedule_backup()
+    return {"ok": True, "sold_rows": n, "price": price}
+
+
+@app.get("/api/export/pnl.csv")
+def export_pnl_csv():
+    """Full book as CSV — one tap, opens in Excel/Sheets on the phone."""
+    import csv
+    import io
+    ipos_ = {i["id"]: i for i in rows("SELECT * FROM ipos")}
+    accs_ = {a["id"]: a for a in rows("SELECT * FROM accounts")}
+    apps_ = rows("SELECT * FROM applications WHERE applied=1")
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["IPO", "Listing date", "Account", "Allotment", "Lots",
+                "Blocked (Rs)", "Allotted qty", "Cost per share (Rs)",
+                "Refund", "CMP (Rs)", "Sold qty", "Sold avg (Rs)",
+                "Sold on", "Booked P&L (Rs)", "Open qty", "Unrealized P&L (Rs)",
+                "Total P&L (Rs)"])
+    for a in apps_:
+        i = ipos_.get(a["ipo_id"], {})
+        ac = accs_.get(a["account_id"], {})
+        qty = a.get("allotted_qty") or 0
+        cost = round(a["amount"] / qty, 2) if qty else 0
+        sq, sp = a.get("sell_qty") or 0, a.get("sell_price") or 0
+        booked = round((sp - cost) * sq, 2) if a.get("allotment") == "allotted" and sq else 0
+        openq = max(0, qty - sq)
+        cmp_ = i.get("cmp") or 0
+        unreal = round((cmp_ - cost) * openq, 2) if a.get("allotment") == "allotted" else 0
+        w.writerow([i.get("name", "?"), i.get("listing_date", ""), ac.get("holder", "?"),
+                    a.get("allotment", ""), a.get("lots", ""), a.get("amount", ""),
+                    qty or "", cost or "", a.get("refund", ""), cmp_ or "",
+                    sq or "", sp or "", a.get("sold_on", ""),
+                    booked or "", openq or "", unreal or "",
+                    round(booked + unreal, 2) if (booked or unreal) else ""])
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="ipo-pnl-{today_str()}.csv"'})
+
+
 @app.post("/api/ipos/{iid}/apply")
 def apply_bulk(iid: int, b: dict = Body(...)):
     accs = rows("SELECT * FROM accounts WHERE active=1")
@@ -1651,6 +1759,8 @@ def run_allotment_checks(ipo: dict) -> list:
 
 
 def notify_alotment_result(ipo: dict, results: list):
+    if not push_prefs().get("allotment", True):
+        return
     decided = [r for r in results if r.get("status") in ("ok", "not_found")]
     if not decided:
         return
@@ -1698,12 +1808,52 @@ def api_market_ipo(iid: int):
 
 @app.post("/api/market/refresh")
 def api_market_refresh():
-    return arthan.refresh_market(force=True)
+    # one tap refreshes EVERYTHING the user sees: the ARTHAN boards +
+    # per-IPO GMP, then the legacy feeds that fill the IPO section's
+    # subscription numbers and the cross-check GMP column.
+    out = arthan.refresh_market(force=True, gap=6)  # manual tap: quicker gate, stays under host time limit
+    def _legacy():  # slow multi-page feeds — catch up in the background
+        try:
+            print("[refresh tap] subs:", refresh_subscriptions(), flush=True)
+            print("[refresh tap] gmp :", refresh_gmp(), flush=True)
+        except Exception as e:  # noqa: BLE001
+            print("[refresh tap] legacy error:", e, flush=True)
+    threading.Thread(target=_legacy, daemon=True).start()
+    out["ipo_subs"] = "refreshing in background"
+    out["ipo_gmp"] = "refreshing in background"
+    return out
+
+
+_VERIFY_BUSY = {"on": False}
 
 
 @app.get("/api/market/verify")
 def api_market_verify():
-    return arthan.daily_verification()
+    # Deep verification needs ~40s (two source samples + a gate pause),
+    # longer than the hosting request limit — so run it in the background.
+    # The stored report (shown on the Verification tab) updates when done.
+    stored = json.loads(kv_get("arthan_verify", "{}") or "{}")
+    queued = False
+    if not _VERIFY_BUSY["on"]:
+        _VERIFY_BUSY["on"] = True
+        queued = True
+
+        def _bg():
+            try:
+                for attempt in (1, 2):  # retry once — boot-time refreshes can briefly lock the DB
+                    try:
+                        rep = arthan.daily_verification(gap=6)
+                        print("[verify] done:", rep, flush=True)
+                        break
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[verify] attempt {attempt} failed:", e, flush=True)
+                        time.sleep(20)
+            finally:
+                _VERIFY_BUSY["on"] = False
+        threading.Thread(target=_bg, daemon=True).start()
+    return {"ok": True, "queued": queued,
+            "note": "verification running in background (~45s) — the Verification tab updates automatically",
+            "last_report": stored}
 
 
 @app.post("/api/gmp/refresh")
@@ -1757,11 +1907,12 @@ def push_new_alerts():
         kv_set("seen_alerts", json.dumps(sorted({f"{a['kind']}|{a['title']}|{a['detail']}" for a in alerts})))
         return  # first run: seed without spamming
     fresh = []
+    allow_push = push_prefs().get("high_alert", True)
     for a in alerts:
         key = f"{a['kind']}|{a['title']}|{a['detail']}"
         if key not in seen:
             seen.add(key)
-            if a.get("sev") == "high":
+            if allow_push and a.get("sev") == "high":
                 fresh.append(a)
     kv_set("seen_alerts", json.dumps(sorted(seen)[-400:]))
     if not fresh:
@@ -1773,13 +1924,128 @@ def push_new_alerts():
                   " • ".join(a["title"] for a in fresh[:3]) + ("…" if len(fresh) > 3 else ""))
 
 
+PUSH_PREF_DEFAULT = {"allotment": True, "close_today": True, "mandate": True,
+                     "listing": True, "gmp_swing": True, "high_alert": True}
+
+
+def push_prefs():
+    try:
+        d = json.loads(kv_get("push_prefs", "{}") or "{}")
+    except (TypeError, ValueError):
+        d = {}
+    return {**PUSH_PREF_DEFAULT,
+            **{k: bool(v) for k, v in d.items() if k in PUSH_PREF_DEFAULT}}
+
+
+@app.get("/api/notifications/prefs")
+def api_get_push_prefs():
+    return push_prefs()
+
+
+@app.post("/api/notifications/prefs")
+def api_set_push_prefs(b: dict = Body(...)):
+    cur = push_prefs()
+    for k in PUSH_PREF_DEFAULT:
+        if k in b:
+            cur[k] = bool(b[k])
+    kv_set("push_prefs", json.dumps(cur))
+    return cur
+
+
+def smart_alerts():
+    """Convenience push pack — time-windowed nudges, each at most once/day:
+       closes-today (morning), mandates-pending (evening), lists-tomorrow
+       (evening), sharp GMP swing on applied IPOs (any refresh cycle)."""
+    if not rows("SELECT 1 x FROM push_subs LIMIT 1"):
+        return
+    pref = push_prefs()
+    now = ist_now()
+    hm = now.hour * 60 + now.minute
+    today = now.date().isoformat()
+    tomorrow = (now.date() + timedelta(days=1)).isoformat()
+    log = json.loads(kv_get("push_log", "{}") or "{}")
+    changed_log = False
+
+    def once(key):
+        return log.get(key) != today
+
+    ipos_ = rows("SELECT * FROM ipos")
+    apps_ = rows("SELECT * FROM applications WHERE applied=1")
+    accs_active = len(rows("SELECT 1 x FROM accounts WHERE active=1"))
+
+    def fire(key, title, body):
+        nonlocal changed_log
+        send_push(title, body)
+        log[key] = today
+        changed_log = True
+
+    # 1) closes today — morning heads-up (09:00-11:30)
+    if pref["close_today"] and 540 <= hm <= 690:
+        for i in ipos_:
+            if ipo_status(i) == "open" and i.get("close_date") == today and once(f"close:{i['id']}"):
+                sub = (json.loads(i.get("sub_json") or "{}")).get("total")
+                applied = sum(1 for a in apps_ if a["ipo_id"] == i["id"])
+                fire(f"close:{i['id']}", f"⏰ {i['name'][:28]} closes TODAY",
+                     f"GMP ₹{(i['gmp'] or 0):.0f}" + (f" • SUB {sub}×" if sub else "") +
+                     f" • applied {applied}/{accs_active} — apply before ~1 PM")
+    # 2) mandates still pending — evening nag (17:00-18:30)
+    if pref["mandate"] and 1020 <= hm <= 1110:
+        by_ipo = {}
+        for a in apps_:
+            if a.get("mandate_status") == "pending":
+                by_ipo[a["ipo_id"]] = by_ipo.get(a["ipo_id"], 0) + 1
+        for iid, n in by_ipo.items():
+            i = next((x for x in ipos_ if x["id"] == iid), None)
+            if i and ipo_status(i) == "open" and once(f"mand:{iid}"):
+                fire(f"mand:{iid}", f"⏳ {n} UPI mandate{'s' if n > 1 else ''} pending — {i['name'][:20]}",
+                     "Approve the collect requests on the phones before the issue closes.")
+    # 3) lists tomorrow — evening heads-up (18:00-20:00)
+    if pref["listing"] and 1080 <= hm <= 1200:
+        for i in ipos_:
+            if i.get("listing_date") == tomorrow and once(f"list:{i['id']}"):
+                sh = sum((a.get("allotted_qty") or 0) for a in apps_
+                         if a["ipo_id"] == i["id"] and a.get("allotment") == "allotted")
+                est = ""
+                if i.get("gmp") and i.get("price_max"):
+                    est = f"Last GMP ₹{i['gmp']:.0f} → est ₹{i['price_max'] + i['gmp']:.0f}."
+                fire(f"list:{i['id']}", f"🔔 {i['name'][:28]} lists TOMORROW",
+                     (f"You hold {sh} shares. " if sh else "") + est)
+    # 4) sharp GMP swing (≥20% & ≥₹5) on IPOs you applied in — any cycle
+    snap = json.loads(kv_get("gmp_snap", "{}") or "{}")
+    snap_changed = False
+    for i in ipos_:
+        g = i.get("gmp") or 0
+        key = str(i["id"])
+        old = snap.get(key)
+        if g > 0:
+            snap[key] = g
+            snap_changed = True
+            if (pref["gmp_swing"] and old and abs(g - old) >= max(5, 0.2 * old) and once(f"gmp:{i['id']}")
+                    and ipo_status(i) in ("open", "upcoming", "result_pending", "allotment_done")
+                    and any(a["ipo_id"] == i["id"] for a in apps_)):
+                arrow = "📈" if g > old else "📉"
+                fire(f"gmp:{i['id']}", f"{arrow} {i['name'][:28]} GMP ₹{old:.0f} → ₹{g:.0f}",
+                     "You have applications here — grey market moved sharply.")
+    if snap_changed:
+        kv_set("gmp_snap", json.dumps(snap))
+    if changed_log:
+        kv_set("push_log", json.dumps(dict(list(log.items())[-40:])))
+
+
 def scheduler():
     last = {"gmp": 0.0, "sync": "", "sub": 0.0, "auto": 0.0, "push": 0.0,
-            "market": 0.0, "verify": ""}
+            "market": 0.0, "verify": "", "smart": 0.0}
     while True:
         try:
             time.sleep(45)  # let the web server boot first
             now = time.time()
+            # convenience push pack (closes/mandates/listings/GMP swings)
+            if now - last["smart"] > 15 * 60:
+                try:
+                    smart_alerts()
+                except Exception as e:
+                    print("[sched] smart_alerts error:", e, flush=True)
+                last["smart"] = now
             # ARTHAN market-intelligence refresh every ~30 min
             if now - last["market"] > 30 * 60:
                 try:

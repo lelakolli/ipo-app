@@ -142,34 +142,82 @@ def match_name(target, candidates, threshold=0.55):
 # source parsers — return dicts keyed by site name
 # ---------------------------------------------------------------------------
 
+def _nearest_heading(html, pos):
+    """Text of the last <h1>..<h5> before pos -- classifies which board a
+    table belongs to (the page carries separate Mainboard / SME tables)."""
+    text = ""
+    for m in re.finditer(r"(?is)<h[1-5][^>]*>(.*?)</h[1-5]>", html[:pos]):
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(1))).strip()
+    return text
+
+
 def parse_iw_gmp(html):
     """IPOWatch GMP board -> {key: rec}. rec:
-    name, slug(url), gmp, est_listing, est_pct, price, dates_txt, board,
-    status, updated"""
+    name, slug(url), gmp, trend, price, est_listing, est_pct, dates_txt,
+    board, status, updated.
+
+    Header-driven: columns are located by their header NAMES, so the site
+    inserting/removing/reordering columns (it added a Trend column in
+    Aug-2026, silently breaking the old positional parser) cannot break us.
+    The "GMP Performance" history table is skipped because it has neither an
+    Est. nor an Updated column."""
     out = {}
-    for tbl in re.findall(r"<table[^>]*>(.*?)</table>", html, re.S):
-        if "Est. Listing" not in tbl or "IPO GMP" not in tbl:
+    for tm in re.finditer(r"(?is)<table[^>]*>.*?</table>", html):
+        tbl = tm.group(0)
+        trs = re.findall(r"(?is)<tr[^>]*>(.*?)</tr>", tbl)
+        if len(trs) < 2:
             continue
-        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", tbl, re.S):
+        hdr = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c)).strip().lower()
+               for c in re.findall(r"(?is)<t[hd][^>]*>(.*?)</t[hd]>", trs[0])]
+
+        def col(*kws):
+            for i, h in enumerate(hdr):
+                if any(k in h for k in kws):
+                    return i
+            return None
+
+        c_name = col("name")
+        c_gmp = col("gmp")
+        c_est = col("est")
+        c_upd = col("updated")
+        if c_name is None or c_gmp is None or (c_est is None and c_upd is None):
+            continue  # unknown/history table (incl. "GMP Performance")
+        c_price = next((i for i, h in enumerate(hdr)
+                        if ("price" in h or "band" in h) and "est" not in h), None)
+        c_date = next((i for i, h in enumerate(hdr)
+                       if "date" in h and "update" not in h), None)
+        c_trend = col("trend")
+        c_status = col("status")
+        board = "SME" if "sme" in _nearest_heading(html, tm.start()).lower() \
+            else "Mainboard"
+
+        def cell(cells, idx):
+            return cells[idx] if idx is not None and idx < len(cells) else ""
+
+        for tr in trs[1:]:
             cells = _cells(tr)
-            if len(cells) < 9 or "IPO Name" in cells[0]:
+            name = cell(cells, c_name)
+            if not name or "ipo name" in name.lower():
                 continue
             link = re.search(r'href="(https://ipowatch\.in/[a-z0-9\-]+/)"', tr)
-            est_m = re.search(r"₹\s*([\d,]+(?:\.\d+)?)\s*\(([\-\d.]+)%\)", cells[4])
-            out[_norm(cells[0])] = {
-                "name": cells[0],
+            est_m = re.search(r"\u20b9\s*([\d,]+(?:\.\d+)?)\s*\(([\-\d.]+)%\)",
+                              cell(cells, c_est))
+            price_txt = re.sub(r"[^\d.,\-]", "", cell(cells, c_price))
+            prices = [p for p in (_num(x) for x in re.split(r"[\-\u2013]", price_txt)) if p]
+            out[_norm(name)] = {
+                "name": name,
                 "url": link.group(1) if link else "",
-                "gmp": _num(re.sub(r"[^\d.\-]", "", cells[1]) or "", 0.0),
-                "price": _num(re.sub(r"[^\d.\-]", "", cells[3]) or "", 0.0),
+                "gmp": _num(re.sub(r"[^\d.\-]", "", cell(cells, c_gmp)) or "", 0.0),
+                "trend": cell(cells, c_trend),
+                "price": max(prices) if prices else _num(price_txt or "", 0.0),
                 "est_listing": _num(est_m.group(1), None) if est_m else None,
                 "est_pct": _num(est_m.group(2), None) if est_m else None,
-                "dates_txt": cells[5],
-                "board": "SME" if "sme" in cells[6].lower() else "Mainboard",
-                "status": cells[7],
-                "updated": cells[8],
+                "dates_txt": cell(cells, c_date),
+                "board": board,
+                "status": cell(cells, c_status),
+                "updated": cell(cells, c_upd),
             }
     return out
-
 
 def parse_iw_sub(html):
     """IPOWatch subscription board -> {key: rec} with qib/nii/rii/total."""
@@ -231,10 +279,12 @@ def parse_ig_kostak(html):
 # mid-update snapshots and layout swaps)
 # ---------------------------------------------------------------------------
 
-def stable_board(url, parser, fields):
+def stable_board(url, parser, fields, gap=None):
+    if gap is None:
+        gap = STABILITY_GAP
     try:
         a = parser(_get(url))
-        time.sleep(STABILITY_GAP)
+        time.sleep(gap)
         b = parser(_get(url))
     except Exception as e:  # noqa: BLE001
         return None, f"{e}"
@@ -258,14 +308,14 @@ def stable_board(url, parser, fields):
 # main refresh — the heart of the engine
 # ---------------------------------------------------------------------------
 
-def refresh_market(force=False):
+def refresh_market(force=False, gap=None):
     s = _srv()
     now = s.ist_now().isoformat(timespec="seconds")
     result = {"ok": True, "matched": 0, "verified": 0, "kept": 0,
               "watch_hits": [], "unstable": [], "errors": []}
 
     gmp_board, unstable_g = stable_board(
-        IW_GMP_URL, parse_iw_gmp, ("gmp", "est_listing", "est_pct", "price"))
+        IW_GMP_URL, parse_iw_gmp, ("gmp", "est_listing", "est_pct", "price"), gap)
     if gmp_board is None:
         result["ok"] = False
         result["errors"].append(f"gmp board: {unstable_g}")
@@ -274,7 +324,7 @@ def refresh_market(force=False):
         result["unstable"] += unstable_g
 
     sub_board, unstable_s = stable_board(
-        IW_SUB_URL, parse_iw_sub, ("qib", "nii", "rii", "total"))
+        IW_SUB_URL, parse_iw_sub, ("qib", "nii", "rii", "total"), gap)
     if sub_board is None:
         result["errors"].append(f"subscription board: {unstable_s}")
         sub_board = {}
@@ -527,9 +577,9 @@ def _dates_from_txt(txt):
 # daily deep verification — re-fetches everything fresh and reports
 # ---------------------------------------------------------------------------
 
-def daily_verification():
+def daily_verification(gap=None):
     s = _srv()
-    res = refresh_market(force=True)
+    res = refresh_market(force=True, gap=gap)
     issues = json.loads(s.kv_get(ISSUES_KV, "[]") or "[]")
 
     # date sanity vs stored dates: boards carry "17-19 August" style ranges
