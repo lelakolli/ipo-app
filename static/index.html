@@ -17,7 +17,7 @@
   --bg:#0b1220; --card:#121b2e; --card2:#182339; --line:#243150;
   --txt:#e6ecf5; --mut:#8b9bb5; --acc:#4f8cff; --grn:#22c55e; --red:#ef4444;
   --amb:#f59e0b; --prp:#a78bfa;
-  --input:var(--input); --hover:var(--hover); --info-bg:#12203a; --info-line:#2c4b8a; --info-txt:#bcd3ff;
+  --input:#0e1730; --hover:#141f36; --info-bg:#12203a; --info-line:#2c4b8a; --info-txt:#bcd3ff;
 }
 :root[data-theme=light]{
   --bg:#f1f4f9; --card:#ffffff; --card2:#eef1f6; --line:#d8dee9;
@@ -91,10 +91,15 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .info{background:var(--info-bg);border:1px solid var(--info-line);border-radius:11px;padding:11px 14px;font-size:12.5px;color:var(--info-txt);margin-bottom:14px;line-height:1.5}
 a{color:var(--acc)}
 .pbar{height:6px;background:var(--line);border-radius:4px;overflow:hidden}
+.acctable td.stick,.acctable th.stick{position:sticky;background:var(--card)}
+.acctable td.c1,.acctable th.c1{left:0;min-width:32px;width:32px;text-align:center}
+.acctable td.c2,.acctable th.c2{left:32px;min-width:108px}
+.acctable th.stick{z-index:4}
+.acctable tr:hover td.stick{background:var(--card)!important}
 .pbar div{height:100%;background:var(--acc)}
 h2.sec{font-size:15px;margin:22px 0 10px;color:var(--txt)}
 select.mini,input.mini{padding:4px 7px;font-size:12px;border-radius:6px}
-input.upi-diff{border-color:var(--amb)!important;background:#2a2113!important}
+input.upi-diff{border-color:var(--amb)!important;background:rgba(245,158,11,.22)!important}
 	td.upi-def{white-space:nowrap}
 input.num{text-align:right;width:90px}
 input.wide{width:150px}
@@ -115,6 +120,14 @@ input.wide{width:150px}
   .toolbar select{min-width:100%}
   .btn{padding:9px 15px}
 }
+@media(max-width:720px){
+  nav{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);display:flex;gap:0;margin:0;padding:2px 0 calc(3px + env(safe-area-inset-bottom));z-index:95;box-shadow:0 -8px 22px rgba(0,0,0,.28)}
+  nav button{flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;font-size:9.5px;padding:7px 2px;color:var(--mut);border:none;border-radius:10px}
+  nav button::before{content:attr(data-ic);font-size:18px;line-height:1.15}
+  nav button.on{background:none;color:var(--acc)}
+}
+main{padding-bottom:8px}
+@media(max-width:720px){main{padding-bottom:86px}}
 </style>
 </head>
 <body>
@@ -123,15 +136,15 @@ input.wide{width:150px}
   <span class="badge" id="hdr-counts">…</span>
   <button class="bellbtn" id="bell" onclick="toggleAlerts()" title="Alerts & reminders">🔔<span id="bell-count"></span></button>
   <nav>
-    <button data-tab="dash" class="on">Dashboard</button>
-    <button data-tab="ipos">IPOs</button>
-    <button data-tab="market">📊 Market</button>
-    <button data-tab="apps">Applications</button>
-    <button data-tab="accounts">Accounts</button>
-    <button data-tab="pnl">P&amp;L</button>
+    <button data-tab="dash" class="on" data-ic="🏠">Dashboard</button>
+    <button data-tab="ipos" data-ic="📋">IPOs</button>
+    <button data-tab="apps" data-ic="✅">Applications</button>
+    <button data-tab="market" data-ic="💹">Market</button>
+    <button data-tab="accounts" data-ic="👥">Accounts</button>
+    <button data-tab="pnl" data-ic="💰">P&amp;L</button>
   </nav>
   <button class="bellbtn themebtn" id="themebtn" onclick="toggleTheme()" title="Switch dark / light">☀️</button>
-  <button class="bellbtn" onclick="logout()" title="Log out on this device">⏻</button>
+  <button class="bellbtn" onclick="logout()" title="Log out on this device"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" style="vertical-align:-3.5px"><path d="M12 2.5v10"/><path d="M18.7 6.4a8.3 8.3 0 1 1-13.4 0"/></svg></button>
 </header>
 <main>
   <section id="tab-dash"></section>
@@ -400,6 +413,7 @@ function renderDash(){
       <input id="pc-cur" inputmode="numeric" maxlength="6" placeholder="current 6-digit" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
       <input id="pc-new" inputmode="numeric" maxlength="6" placeholder="new 6-digit" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
       <button class="btn sm" onclick="changePass()">Change passcode</button>
+      <button class="btn sm ghost" onclick="fpRegister()" title="Unlock this app with your phone's fingerprint / screen lock">👆 Register fingerprint unlock</button>
     </div>
     <div class="mut" style="font-size:11.5px;margin-top:6px">the new passcode is saved permanently (it survives app updates and restarts). If your host pinned a PASSCODE there, change it in the host dashboard instead.</div>
   </div>`;
@@ -529,27 +543,29 @@ function renderAccounts(){
   const el=document.getElementById('tab-accounts');
   el.innerHTML=`
   <div class="toolbar"><button class="btn" onclick="accModal()">+ Add account</button>
-  <span class="mut">Store PAN <b>or</b> 16-digit CDSL BO ID per account — either works for allotment auto-check (Bigshare), PAN works everywhere.</span></div>
-  <div class="card"><div style="overflow:auto"><table><thead><tr><th>Account</th><th>PAN</th><th>CDSL BO ID</th><th>Default UPI ID</th><th>Broker</th><th>Bank</th><th>Sell auth</th><th>Active</th><th>Applications</th><th>Booked P&L</th><th></th></tr></thead><tbody>
-  ${S.accounts.map(a=>{const apps=S.applications.filter(x=>x.account_id===a.id&&x.applied);
+  <span class="mut">Order is yours — use ▲▼ to arrange applicants. PAN <b>or</b> 16-digit CDSL BO ID per account powers allotment auto-check.</span></div>
+  <div class="card"><div style="overflow:auto"><table class="acctable"><thead><tr><th class="stick c1">#</th><th class="stick c2">Applicant</th><th>Booked P&L</th><th>Default UPI ID</th><th>Applications</th><th>PAN</th><th>BO ID</th><th></th></tr></thead><tbody>
+  ${S.accounts.map((a,ix)=>{const apps=S.applications.filter(x=>x.account_id===a.id&&x.applied);
     const booked=apps.reduce((s,x)=>s+bookedPnl(x),0);
     return `<tr>
-    <td><b>${esc(a.holder)}</b>${a.notes?`<br><span class="mut" style="font-size:11.5px">${esc(a.notes)}</span>`:''}</td>
+    <td class="stick c1 mut">${ix+1}</td>
+    <td class="stick c2"><b>${esc(a.holder)}</b>${a.active?'':' <span class="chip c-closed">inactive</span>'}${a.notes?`<br><span class="mut" style="font-size:11.5px">${esc(a.notes)}</span>`:''}</td>
+    <td class="${pnlCls(booked)}">${apps.some(x=>x.sell_qty>0)?pnlTxt(booked):'—'}</td>
+    <td><code>${esc(a.upi)||'<span class="mut">—</span>'}</code></td>
+    <td>${apps.length}</td>
     <td>${esc(a.pan)||'<span class="mut">—</span>'}</td>
     <td>${esc(a.cdsl)||'<span class="mut">—</span>'}</td>
-    <td><code>${esc(a.upi)||'—'}</code></td>
-    <td>${esc(a.broker)||'—'}</td><td>${esc(a.bank)||'—'}</td>
-    <td>${a.auth_mode==='DDPI'?'<span class="chip c-open" title="DDPI/PoA active — can sell anytime without daily TPIN">DDPI ✓</span>'
-        :a.auth_mode==='TPIN'?'<span class="chip c-result_pending" title="CDSL TPIN authorization needed on each sell day">TPIN</span>'
-        :'<span class="mut">—</span>'}</td>
-    <td>${a.active?'✅':'⛔'}</td>
-    <td>${apps.length}</td>
-    <td class="${pnlCls(booked)}">${apps.some(x=>x.sell_qty>0)?pnlTxt(booked):'—'}</td>
-    <td class="row-actions"><button class="btn sm ghost" onclick="accModal(${a.id})">Edit</button>
+    <td class="row-actions" style="white-space:nowrap">
+    <button class="btn sm ghost" onclick="moveAcc(${a.id},-1)" title="Move up in the list">▲</button>
+    <button class="btn sm ghost" onclick="moveAcc(${a.id},1)" title="Move down in the list">▼</button>
+    <button class="btn sm ghost" onclick="accModal(${a.id})">Edit</button>
     <button class="btn sm danger" onclick="delAcc(${a.id},'${esc(a.holder)}')">✕</button></td></tr>`;}).join('')
-    ||'<tr><td colspan="11" class="mut">No accounts yet — add your 15+ demat accounts here.</td></tr>'}
+    ||'<tr><td colspan="8" class="mut">No accounts yet — add your 15+ demat accounts here.</td></tr>'}
   </tbody></table></div></div>`;
 }
+window.moveAcc=async(id,dir)=>{
+  await api(`/api/accounts/${id}/move`,'POST',{dir});
+  refresh();};
 window.delAcc=async(id,name)=>{if(!confirm(`Delete account "${name}" and its application rows?`))return;
   await api('/api/accounts/'+id,'DELETE');toast('Deleted');refresh();};
 window.accModal=(id)=>{
@@ -604,7 +620,6 @@ function renderApps(){
     <td><input type="number" class="mini num f-lots" style="width:60px" min="0" value="${ap.lots||1}" ${dis}></td>
     <td><input type="number" class="mini num f-amount" step="0.01" value="${ap.amount||''}" ${dis}></td>
     <td><select class="mini f-mandate" ${dis}>${['pending','approved','rejected','expired'].map(s=>`<option ${ap.mandate_status===s?'selected':''}>${s}</option>`).join('')}</select></td>
-    <td><input class="mini wide f-appno" value="${esc(ap.app_no||'')}" placeholder="app no." ${dis}></td>
     <td><select class="mini f-refund" ${dis}>${[['na','n/a'],['pending','pending'],['received','unblocked ✓']].map(([v,l])=>`<option value="${v}" ${ap.refund===v?'selected':''}>${l}</option>`).join('')}</select></td>
     <td><input type="number" class="mini num f-sqty" style="width:65px" min="0" value="${ap.sell_qty||''}" ${dis}></td>
     <td><input type="number" class="mini num f-sprice" style="width:80px" step="0.01" value="${ap.sell_price||''}" ${dis}></td>
@@ -660,7 +675,7 @@ function renderApps(){
     <div class="pbar" title="Apply progress"><div style="width:${S.accounts.filter(a=>a.active).length?Math.round(applied.length/S.accounts.filter(a=>a.active).length*100):0}%"></div></div>
     <div style="height:10px"></div>
     <div style="overflow:auto"><table><thead><tr>
-      <th>Account</th><th>Applied</th><th>Allotment</th><th>Default UPI ID</th><th>Used UPI ID</th><th>P&L</th><th>Allotted qty</th><th>Lots</th><th>Amount ₹</th><th>Mandate</th><th>App no.</th><th>Refund</th><th>Sell qty</th><th>Sell ₹</th>
+      <th>Account</th><th>Applied</th><th>Allotment</th><th>Default UPI ID</th><th>Used UPI ID</th><th>P&L</th><th>Allotted qty</th><th>Lots</th><th>Amount ₹</th><th>Mandate</th><th>Refund</th><th>Sell qty</th><th>Sell ₹</th>
     </tr></thead><tbody>${rowsHtml}</tbody></table></div>
   </div>`;
   document.querySelectorAll('#tab-apps tbody tr').forEach(tr=>{
@@ -673,7 +688,7 @@ async function collectRow(tr){
   const gv=c=>tr.querySelector(c).value;
   const gc=c=>tr.querySelector(c).checked;
   return {ipo_id:selIpo,account_id:+tr.dataset.acc,applied:gc('.f-applied')?1:0,
-    lots:+gv('.f-lots')||0,amount:+gv('.f-amount')||0,upi:gv('.f-upi'),app_no:gv('.f-appno'),
+    lots:+gv('.f-lots')||0,amount:+gv('.f-amount')||0,upi:gv('.f-upi'),app_no:(tr.querySelector('.f-appno')||{value:''}).value,
     mandate_status:gv('.f-mandate'),allotment:gv('.f-allot'),allotted_qty:+gv('.f-aqty')||0,
     refund:gv('.f-refund'),sell_qty:+gv('.f-sqty')||0,sell_price:+gv('.f-sprice')||0};
 }
@@ -710,6 +725,22 @@ window.applyAll=async()=>{
   if(!confirm(`Apply 1 lot in "${ipo.name}" for all ${active.length} active accounts${amt?` (~${rs(amt)} each, ${kr(amt*active.length)} total)`:''}?\nUPI auto-fills from each account's default.`))return;
   const r=await api(`/api/ipos/${selIpo}/apply`,'POST',{lots,category:'Retail'});
   toast(`Applied for ${r.applied} accounts ✔`);refresh();};
+function _bufToB64(b){return btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+window.fpRegister=async()=>{
+  if(!('credentials' in navigator)||!window.PublicKeyCredential)return toast('This browser does not support biometrics',1);
+  try{
+    const o=await api('/api/webauthn/register/options','POST',{});
+    const cred=await navigator.credentials.create({publicKey:{
+      challenge:_b64u8(o.challenge),rp:o.rp,
+      user:{id:_b64u8(o.user.id),name:o.user.name,displayName:o.user.displayName},
+      pubKeyCredParams:o.pubKeyCredParams,timeout:o.timeout,
+      authenticatorSelection:o.authenticatorSelection}});
+    await api('/api/webauthn/register/verify','POST',{id:cred.id,
+      clientDataJSON:_bufToB64(cred.response.clientDataJSON),
+      attestationObject:_bufToB64(cred.response.attestationObject)});
+    toast('👆 Fingerprint unlock enabled on this phone ✅');
+  }catch(e){toast('Fingerprint setup cancelled or failed',1);}
+};
 window.toggleTheme=()=>{const el=document.documentElement;const light=el.dataset.theme!=='light';
   el.dataset.theme=light?'light':'';
   try{localStorage.setItem('ic-theme',light?'light':'dark');}catch(_){}

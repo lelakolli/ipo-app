@@ -131,11 +131,13 @@ def migrate():
                     "ALTER TABLE ipos ADD COLUMN sub_at TEXT DEFAULT ''",
                     "ALTER TABLE ipos ADD COLUMN mkt_json TEXT DEFAULT ''",
                     "ALTER TABLE ipos ADD COLUMN mkt_at TEXT DEFAULT ''",
-                    "ALTER TABLE ipos ADD COLUMN gmp_feed REAL DEFAULT 0"):
+                    "ALTER TABLE ipos ADD COLUMN gmp_feed REAL DEFAULT 0",
+                    "ALTER TABLE accounts ADD COLUMN sort INTEGER DEFAULT 0"):
             try:
                 con.execute(ddl)
             except sqlite3.OperationalError:
                 pass
+        con.execute("UPDATE accounts SET sort=id*10 WHERE sort=0")   # one-time backfill
         con.commit()
 
 
@@ -1229,15 +1231,28 @@ button{background:var(--acc);border:none;color:#fff;border-radius:10px;padding:1
 <div class="box"><div style="font-size:38px">🔒</div><h2 style="font-size:17px;margin:10px 0 4px">IPO Command Center</h2>
 <p style="color:var(--mut);font-size:13px">Enter your 6-digit passcode</p>
 <input id="c" inputmode="numeric" maxlength="6" autocomplete="off" autofocus>
-<button onclick="go()">Unlock</button><div class="err" id="e"></div>
+<button onclick="go()">Unlock</button>
+<button id="fp" style="display:none;background:transparent;border:1px solid var(--acc);color:var(--acc);margin-top:10px" onclick="fp()">👆 Unlock with fingerprint</button><div class="err" id="e"></div>
 <p style="color:var(--mut);font-size:11px;margin-top:14px">Forgot it? If you set a PASSCODE in your hosting dashboard, change it there. Otherwise check the hosting logs for the line "FIRST-RUN PASSCODE".</p></div>
 <script>
 const go=async()=>{const r=await fetch('/api/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:document.getElementById('c').value})});
 if(r.ok)location.href='/';else{let m='Wrong passcode — try again';try{const j=await r.json();if(j.detail)m=j.detail;}catch(_){}document.getElementById('e').textContent=m;}};
-document.getElementById('c').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+document.getElementById('c').addEventListener('keydown',e=>{if(e.key==='Enter')go()});
+const b64d=s=>{const p=atob(s.replace(/-/g,'+').replace(/_/g,'/'));const a=new Uint8Array(p.length);for(let i=0;i<p.length;i++)a[i]=p.charCodeAt(i);return a.buffer;};
+const b64e=b=>btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+fetch('/api/webauthn/status').then(r=>r.json()).then(j=>{if(j.enabled)document.getElementById('fp').style.display='block';}).catch(()=>{});
+const fp=async()=>{try{
+  const o=await (await fetch('/api/webauthn/login/options',{method:'POST'})).json();
+  o.challenge=b64d(o.challenge);o.allowCredentials=(o.allowCredentials||[]).map(c=>({type:c.type,id:b64d(c.id)}));
+  const a=await navigator.credentials.get({publicKey:o});
+  const r=await fetch('/api/webauthn/login/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:a.id,clientDataJSON:b64e(a.response.clientDataJSON),authenticatorData:b64e(a.response.authenticatorData),signature:b64e(a.response.signature)})});
+  if(r.ok)location.href='/';else document.getElementById('e').textContent='Fingerprint not recognized — use passcode';
+}catch(_){document.getElementById('e').textContent='Fingerprint cancelled — use passcode';}};
 </script></body></html>"""
 
-PUBLIC_PATHS = {"/manifest.json", "/sw.js", "/favicon.ico", "/api/unlock", "/healthz"}
+PUBLIC_PATHS = {"/manifest.json", "/sw.js", "/favicon.ico", "/api/unlock", "/healthz",
+                "/api/webauthn/status", "/api/webauthn/login/options",
+                "/api/webauthn/login/verify"}
 
 
 def _authed(req) -> bool:
@@ -1324,6 +1339,115 @@ def api_logout():
        next page load. Other signed-in devices are unaffected."""
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("ipo_auth", httponly=True, samesite="lax")
+    return resp
+
+
+# ----------------------------------------------------------------------------
+# fingerprint / screen-lock unlock (WebAuthn, optional layer over the passcode)
+# registration needs a logged-in session; login endpoints are public (they ARE
+# the second auth path). Falls back to passcode if anything is unavailable.
+# ----------------------------------------------------------------------------
+
+def _b64e(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def _b64d(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s.replace("-", "+").replace("_", "/")
+                                    + "=" * (-len(s) % 4))
+
+
+def _wa_server(host: str):
+    try:
+        from fido2.server import Fido2Server
+        from fido2.webauthn import PublicKeyCredentialRpEntity
+        return Fido2Server(PublicKeyCredentialRpEntity(id=host, name="IPO Command Center"))
+    except Exception:
+        return None
+
+
+def _wa_cred():
+    try:
+        return json.loads(kv_get("wa_cred", "null") or "null")
+    except (TypeError, ValueError):
+        return None
+
+
+@app.get("/api/webauthn/status")
+def wa_status():
+    return {"enabled": _wa_cred() is not None}
+
+
+@app.post("/api/webauthn/register/options")
+def wa_register_options(request: Request):
+    srv = _wa_server(request.url.hostname)
+    if srv is None:
+        raise HTTPException(503, "biometric library unavailable on server")
+    challenge = secrets.token_bytes(32)
+    kv_set("wa_state", json.dumps({"challenge": _b64e(challenge), "ts": time.time()}))
+    return {"challenge": _b64e(challenge), "rp": {"name": "IPO Command Center"},
+            "user": {"id": _b64e(b"owner"), "name": "owner", "displayName": "Owner"},
+            "pubKeyCredParams": [{"type": "public-key", "alg": -7},
+                                 {"type": "public-key", "alg": -257}],
+            "timeout": 60000,
+            "authenticatorSelection": {"authenticatorAttachment": "platform",
+                                       "userVerification": "preferred"}}
+
+
+@app.post("/api/webauthn/register/verify")
+def wa_register_verify(request: Request, b: dict = Body(...)):
+    srv = _wa_server(request.url.hostname)
+    st = json.loads(kv_get("wa_state", "null") or "null")
+    if srv is None or not st or time.time() - st.get("ts", 0) > 300:
+        raise HTTPException(400, "registration session expired — tap again")
+    try:
+        out = srv.register_complete(
+            {"challenge": _b64d(st["challenge"])},
+            _b64d(b["clientDataJSON"]), _b64d(b["attestationObject"]))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"could not register ({e.__class__.__name__})")
+    cd = out.credential_data
+    kv_set("wa_cred", json.dumps({"cred_id": _b64e(cd.credential_id),
+                                  "key": _b64e(cd.public_key)}))
+    kv_set("wa_state", "null")
+    return {"ok": True}
+
+
+@app.post("/api/webauthn/login/options")
+def wa_login_options(request: Request):
+    cred = _wa_cred()
+    if not cred:
+        raise HTTPException(404, "no fingerprint registered")
+    challenge = secrets.token_bytes(32)
+    kv_set("wa_state", json.dumps({"challenge": _b64e(challenge), "ts": time.time()}))
+    return {"challenge": _b64e(challenge), "timeout": 60000,
+            "userVerification": "preferred",
+            "allowCredentials": [{"type": "public-key", "id": cred["cred_id"]}]}
+
+
+@app.post("/api/webauthn/login/verify")
+def wa_login_verify(request: Request, b: dict = Body(...)):
+    srv = _wa_server(request.url.hostname)
+    cred = _wa_cred()
+    st = json.loads(kv_get("wa_state", "null") or "null")
+    if srv is None or not cred or not st or time.time() - st.get("ts", 0) > 180:
+        raise HTTPException(400, "no active fingerprint challenge")
+    try:
+        from fido2.webauthn import PublicKeyCredentialDescriptor
+        srv.authenticate_complete(
+            {"challenge": _b64d(st["challenge"])},
+            [PublicKeyCredentialDescriptor(type="public-key",
+                                           id=_b64d(cred["cred_id"]))],
+            _b64d(cred["key"]),
+            _b64d(b["clientDataJSON"]), _b64d(b["authenticatorData"]),
+            _b64d(b["signature"]))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(401, f"fingerprint check failed ({e.__class__.__name__})")
+    kv_set("wa_state", "null")
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie("ipo_auth", _auth_token(), max_age=30 * 86400,
+                    httponly=True, samesite="lax",
+                    secure=(request.url.scheme == "https"))
     return resp
 
 
@@ -1467,7 +1591,7 @@ def state():
         except (TypeError, ValueError):
             i["mkt"] = None
     return {
-        "accounts": rows("SELECT * FROM accounts ORDER BY holder"),
+        "accounts": rows("SELECT * FROM accounts ORDER BY sort, holder, id"),
         "ipos": ipos,
         "applications": rows("SELECT * FROM applications"),
         "today": today_str(),
@@ -1476,6 +1600,26 @@ def state():
 
 
 # ---- accounts ----
+@app.post("/api/accounts/{aid}/move")
+def move_account(aid: int, b: dict = Body(...)):
+    """Move one account up/down in the custom Applicants order (Accounts tab)."""
+    direction = -1 if str(b.get("dir")) in ("-1", "up") else 1
+    accts = rows("SELECT id, sort FROM accounts ORDER BY sort, holder, id")
+    idx = next((i for i, a in enumerate(accts) if a["id"] == aid), None)
+    if idx is None:
+        raise HTTPException(404, "account not found")
+    j = idx + direction
+    if 0 <= j < len(accts):
+        a, o = accts[idx], accts[j]
+        with LOCK, get_db() as con:  # normalize then swap
+            for n, x in enumerate(accts):
+                con.execute("UPDATE accounts SET sort=? WHERE id=?", ((n + 1) * 10, x["id"]))
+            con.execute("UPDATE accounts SET sort=? WHERE id=?", ((j + 1) * 10, a["id"]))
+            con.execute("UPDATE accounts SET sort=? WHERE id=?", ((idx + 1) * 10, o["id"]))
+            con.commit()
+    return {"ok": True}
+
+
 @app.post("/api/accounts")
 def create_account(b: dict = Body(...)):
     holder = (b.get("holder") or "").strip()
