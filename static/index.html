@@ -96,11 +96,10 @@ a{color:var(--acc)}
 .acctable td.c2,.acctable th.c2{left:32px;min-width:108px}
 .acctable th.stick{z-index:4}
 .acctable tr:hover td.stick{background:var(--card)!important}
-/* compact accounts rows — no wasted vertical space */
-.acctable td{padding:4px 8px}
-.acctable th{padding:5px 8px}
-.acctable .btn.sm{padding:2px 8px;font-size:11px}
-.acctable code{font-size:12px}
+/* accounts rows: same comfortable size as the applications tab, and the table
+   slides sideways like it (sticky # + Applicant columns stay pinned) */
+.acctable{min-width:720px}
+.acctable td{white-space:nowrap}
 /* applications tab: applicant column stays fixed while the rest slides */
 .apptable td.stick,.apptable th.stick{position:sticky;left:0;background:var(--card);min-width:118px;box-shadow:2px 0 0 var(--line);z-index:3}
 .apptable th.stick{z-index:5}
