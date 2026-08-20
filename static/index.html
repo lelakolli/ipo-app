@@ -96,6 +96,15 @@ a{color:var(--acc)}
 .acctable td.c2,.acctable th.c2{left:32px;min-width:108px}
 .acctable th.stick{z-index:4}
 .acctable tr:hover td.stick{background:var(--card)!important}
+/* compact accounts rows — no wasted vertical space */
+.acctable td{padding:4px 8px}
+.acctable th{padding:5px 8px}
+.acctable .btn.sm{padding:2px 8px;font-size:11px}
+.acctable code{font-size:12px}
+/* applications tab: applicant column stays fixed while the rest slides */
+.apptable td.stick,.apptable th.stick{position:sticky;left:0;background:var(--card);min-width:118px;box-shadow:2px 0 0 var(--line);z-index:3}
+.apptable th.stick{z-index:5}
+.apptable tr:hover td.stick{background:var(--card)!important}
 .pbar div{height:100%;background:var(--acc)}
 h2.sec{font-size:15px;margin:22px 0 10px;color:var(--txt)}
 select.mini,input.mini{padding:4px 7px;font-size:12px;border-radius:6px}
@@ -612,7 +621,7 @@ function renderApps(){
     const preListed=ap.allotment==='allotted'&&!(ipo.cmp>0)&&!(ap.sell_qty>0);
     const estTot=preListed&&ipo.gmp>0?ipo.gmp*ap.allotted_qty:null;
     return `<tr data-acc="${a.id}">
-    <td><b>${esc(a.holder)}</b>${a.active?'':' <span class="chip c-closed">inactive</span>'}<br><span class="mut" style="font-size:11px">${esc(a.pan||a.cdsl||'no PAN/BO ID')}</span></td>
+    <td class="stick"><b>${esc(a.holder)}</b>${a.active?'':' <span class="chip c-closed">inactive</span>'}<br><span class="mut" style="font-size:11px">${esc(a.pan||a.cdsl||'no PAN/BO ID')}</span></td>
     <td><input type="checkbox" class="f-applied" ${ap.applied?'checked':''}></td>
     <td><select class="mini f-allot" ${dis}>${['pending','allotted','not_allotted'].map(s=>`<option value="${s}" ${ap.allotment===s?'selected':''}>${s.replace('_',' ')}</option>`).join('')}</select></td>
     <td class="upi-def"><span class="mut" style="font-size:11.5px" title="This account's default UPI ID (set in Accounts tab)">${a.upi?esc(a.upi):'<span class="neg">not set</span>'}</span>
@@ -677,8 +686,8 @@ function renderApps(){
     <h3>${esc(ipo.name)} <small>— ${applied.length}/${S.accounts.filter(a=>a.active).length} accounts applied • ${uniqUpis} UPI IDs used • blocked ${kr(blocked)} • ${allot} allotted${ipo.cmp?` • CMP ₹${num(ipo.cmp)}`:''} • changes auto-save</small></h3>
     <div class="pbar" title="Apply progress"><div style="width:${S.accounts.filter(a=>a.active).length?Math.round(applied.length/S.accounts.filter(a=>a.active).length*100):0}%"></div></div>
     <div style="height:10px"></div>
-    <div style="overflow:auto"><table><thead><tr>
-      <th>Account</th><th>Applied</th><th>Allotment</th><th>Default UPI ID</th><th>Used UPI ID</th><th>P&L</th><th>Allotted qty</th><th>Lots</th><th>Amount ₹</th><th>Mandate</th><th>Refund</th><th>Sell qty</th><th>Sell ₹</th>
+    <div style="overflow:auto"><table class="apptable"><thead><tr>
+      <th class="stick">Account</th><th>Applied</th><th>Allotment</th><th>Default UPI ID</th><th>Used UPI ID</th><th>P&L</th><th>Allotted qty</th><th>Lots</th><th>Amount ₹</th><th>Mandate</th><th>Refund</th><th>Sell qty</th><th>Sell ₹</th>
     </tr></thead><tbody>${rowsHtml}</tbody></table></div>
   </div>`;
   document.querySelectorAll('#tab-apps tbody tr').forEach(tr=>{
@@ -839,6 +848,24 @@ function renderPnl(){
     <td class="${pnlCls(unrl)}">${openQty?(ipo.cmp?pnlTxt(unrl):'<span class="mut">set CMP</span>'):'—'}</td>
     <td class="${pnlCls(book+unrl)}" style="font-weight:700">${pnlTxt(book+unrl)}</td>
     </tr>`;}).join('');
+  // ---- month-to-month & year-to-year profits (booked minus charges) ----
+  const chargeItems=(S.charges&&S.charges.items)||[], chargeTpls=(S.charges&&S.charges.templates)||[];
+  const mAgg={};
+  const addM=(m,b,c)=>{if(!m||!/^\d{4}-\d{2}$/.test(m))return;const o=mAgg[m]||(mAgg[m]={b:0,c:0});o.b+=b||0;o.c+=c||0;};
+  apps.forEach(a=>{if(!(a.sell_qty>0))return;const ipo=ipoById(a.ipo_id)||{};
+    addM(((a.sold_on||ipo.listing_date||'')+'').slice(0,7),bookedPnl(a),0);});
+  chargeItems.forEach(x=>addM(((x.date||'')+'').slice(0,7),0,+x.amount||0));
+  const mKeys=Object.keys(mAgg).sort().reverse();
+  const fyOf=m=>{const y=+m.slice(0,4),mm=+m.slice(5,7),s=mm>=4?y:y-1;return `FY ${s}-${String((s+1)%100).padStart(2,'0')}`;};
+  const mLab=m=>{const[y,mm]=m.split('-');return new Date(+y,+mm-1,1).toLocaleString('en-IN',{month:'short',year:'numeric'});};
+  const fold=(keyFn)=>{const p={};mKeys.forEach(m=>{const k=keyFn(m),o=p[k]||(p[k]={b:0,c:0});o.b+=mAgg[m].b;o.c+=mAgg[m].c;});return p;};
+  const fyAgg=fold(fyOf), cyAgg=fold(m=>m.slice(0,4));
+  const periodRows=(pool,labFn)=>{const ks=Object.keys(pool).sort().reverse();
+    if(!ks.length)return '<tr><td colspan="4" class="mut">Nothing here yet — rows appear after your first sale / first charge.</td></tr>';
+    let tB=0,tC=0;
+    const body=ks.map(k=>{const o=pool[k];tB+=o.b;tC+=o.c;
+      return `<tr><td><b>${labFn?labFn(k):k}</b></td><td class="${pnlCls(o.b)}">${pnlTxt(o.b)}</td><td class="${o.c?'neg':'mut'}">${o.c?'−'+kr(o.c):'—'}</td><td class="${pnlCls(o.b-o.c)}" style="font-weight:700">${pnlTxt(o.b-o.c)}</td></tr>`;}).join('');
+    return body+`<tr><td style="border-top:2px solid var(--line)"><b>Total</b></td><td style="border-top:2px solid var(--line)" class="${pnlCls(tB)}"><b>${pnlTxt(tB)}</b></td><td style="border-top:2px solid var(--line)" class="neg"><b>${tC?'−'+kr(tC):'—'}</b></td><td style="border-top:2px solid var(--line)" class="${pnlCls(tB-tC)}"><b>${pnlTxt(tB-tC)}</b></td></tr>`;};
   el.innerHTML=`
   <div class="toolbar"><button class="btn ghost" onclick="dlPnl()">⬇ Download full P&L (CSV)</button><span class="mut">every application incl. blocked amounts & refunds — opens in Excel/Sheets</span></div>
   <div class="grid-kpi">
@@ -848,12 +875,53 @@ function renderPnl(){
     <div class="kpi"><div class="l">Unrealized P&L</div><div class="v ${pnlCls(tUnreal)}">${pnlTxt(tUnreal)}</div></div>
     <div class="kpi"><div class="l">Overall</div><div class="v ${pnlCls(tBook+tUnreal)}">${pnlTxt(tBook+tUnreal)}</div></div>
   </div>
+  <div class="card"><h3>📆 Profits — month to month & year to year <small>booked profit minus charges • undated sales count in their listing month</small></h3>
+  <div class="two">
+    <div><div class="mut" style="font-size:12px;font-weight:700;margin-bottom:6px">MONTH TO MONTH</div>
+      <div style="overflow:auto;max-height:340px"><table><thead><tr><th>Month</th><th>Booked</th><th>Charges</th><th>Net</th></tr></thead>
+      <tbody>${periodRows(mAgg,mLab)}</tbody></table></div></div>
+    <div><div class="mut" style="font-size:12px;font-weight:700;margin-bottom:6px">YEAR TO YEAR — FINANCIAL (APR–MAR) & CALENDAR</div>
+      <div style="overflow:auto;max-height:170px;margin-bottom:12px"><table><thead><tr><th>Financial year</th><th>Booked</th><th>Charges</th><th>Net</th></tr></thead>
+      <tbody>${periodRows(fyAgg)}</tbody></table></div>
+      <div style="overflow:auto;max-height:170px"><table><thead><tr><th>Calendar year</th><th>Booked</th><th>Charges</th><th>Net</th></tr></thead>
+      <tbody>${periodRows(cyAgg)}</tbody></table></div></div>
+  </div></div>
+  <div class="card"><h3>💳 Card &amp; other charges <small>these get deducted from the profit tables above</small></h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input type="month" id="chg-month" style="background:var(--input);border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:8px" value="${S.today.slice(0,7)}">
+      <input type="number" id="chg-amt" placeholder="₹ amount" min="1" step="0.01" style="width:110px;background:var(--input);border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:8px">
+      <input id="chg-note" placeholder="note — e.g. HDFC card fee" style="flex:1;min-width:150px;background:var(--input);border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:8px">
+      <button class="btn sm" onclick="addCharge(false)">Add</button>
+      <button class="btn sm ghost" onclick="addCharge(true)" title="Adds this charge EVERY month, starting from the chosen month (fills past missed months too)">↻ Add every month</button>
+    </div>
+    ${chargeTpls.length?`<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">${chargeTpls.map(t=>`<span class="badge">↻ ${rs(t.amount)}/month • ${esc(t.note||'charge')} <small>(since ${t.since?new Date(+t.since.slice(0,4),+t.since.slice(5,7)-1,1).toLocaleString('en-IN',{month:'short',year:'numeric'}):'?'})</small> <a href="#" onclick="delChargeTpl('${t.id}');return false" title="Stop this monthly charge" style="color:var(--red);text-decoration:none;font-weight:700">✕</a></span>`).join('')}</div>`:''}
+    <div style="margin-top:10px">
+      ${chargeItems.length?chargeItems.slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(x=>`<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;border-bottom:1px solid var(--line);font-size:13px">
+        <span style="min-width:74px" class="mut">${x.date?new Date(+x.date.slice(0,4),+x.date.slice(5,7)-1,1).toLocaleString('en-IN',{month:'short',year:'numeric'}):'?'}</span>
+        <span class="neg" style="min-width:86px;font-weight:650">−${rs(x.amount)}</span>
+        <span style="flex:1">${esc(x.note||'')}${x.tpl?' <span class="mut" style="font-size:11px">↻ auto</span>':''}</span>
+        <button class="btn sm danger" onclick="delCharge('${x.id}')" title="Delete this month’s charge">✕</button>
+      </div>`).join(''):'<div class="mut" style="font-size:12.5px">No charges recorded yet — add your monthly credit-card charge above (tap ↻ to auto-add it every month).</div>'}
+    </div>
+  </div>
   <div class="info">💡 On listing day: edit the IPO and set <b>CMP</b> → unrealized P&L updates instantly. When you sell, enter <b>sell qty + avg price</b> in Applications → booked profit locks in.</div>
   <div class="card"><h3>Allotment positions <small>(per account)</small></h3>
   <div style="overflow:auto"><table><thead><tr>
     <th>IPO</th><th>Account</th><th>Allotted</th><th>Cost/sh</th><th>Invested</th><th>CMP</th><th>Sold</th><th>Booked P&L</th><th>Open qty</th><th>Unrealized</th><th>Total</th>
   </tr></thead><tbody>${rowsH||'<tr><td colspan="11" class="mut">No allotments yet — when you win one, it shows up here.</td></tr>'}</tbody></table></div></div>`;
 }
+window.addCharge=async(repeat)=>{
+  const m=document.getElementById('chg-month').value;
+  const a=+document.getElementById('chg-amt').value||0;
+  const n=document.getElementById('chg-note').value.trim();
+  if(!(a>0))return toast('Enter the charge amount',1);
+  const r=await api('/api/charges','POST',{amount:a,note:n,month:m||undefined,repeat:!!repeat});
+  S.charges=r;renderPnl();
+  toast(repeat?'↻ Recurring charge added — it fills every month automatically':'Charge added');
+};
+window.delCharge=async(id)=>{const r=await api('/api/charges/item/'+encodeURIComponent(id),'DELETE');S.charges=r;renderPnl();toast('Charge deleted');};
+window.delChargeTpl=async(id)=>{if(!confirm('Stop this monthly charge from now on? Past months stay as history.'))return;
+  const r=await api('/api/charges/tpl/'+encodeURIComponent(id),'DELETE');S.charges=r;renderPnl();toast('↻ Monthly charge stopped — past entries kept');};
 
 // ---------- alerts ----------
 let seenAlerts=new Set(JSON.parse(localStorage.getItem('seenAlerts')||'[]'));

@@ -1676,10 +1676,15 @@ def state():
             i["mkt"] = json.loads(i["mkt_json"]) if i.get("mkt_json") else None
         except (TypeError, ValueError):
             i["mkt"] = None
+    try:
+        _charges_month_roll()  # keep recurring monthly charges current
+    except Exception as e:
+        print("[charges] roll failed:", e, flush=True)
     return {
         "accounts": rows("SELECT * FROM accounts ORDER BY sort, holder, id"),
         "ipos": ipos,
         "applications": rows("SELECT * FROM applications"),
+        "charges": charges_store(),
         "today": today_str(),
         "mobile": mobile_info(),
     }
@@ -1820,6 +1825,10 @@ def upsert_app(ipo_id, acc_id, fields: dict, auto_amount=True):
         merged["refund"] = "na"
     elif merged.get("allotment") == "not_allotted" and merged.get("refund") in ("na", "", None):
         merged["refund"] = "pending"
+    # stamp the sale date when a sale is first recorded on a row that has none —
+    # month-to-month profit reports depend on this (fallback: listing month)
+    if (merged.get("sell_qty") or 0) > 0 and not merged.get("sold_on"):
+        merged["sold_on"] = today_str()
 
     if ex:
         sets = ",".join(f"{k}=?" for k in merged if k != "id")
@@ -1932,9 +1941,180 @@ def export_pnl_csv():
                     sq or "", sp or "", a.get("sold_on", ""),
                     booked or "", openq or "", unreal or "",
                     round(booked + unreal, 2) if (booked or unreal) else ""])
+    # ---- report sections: charges + month / FY / calendar-year profits ----
+    months, fys, cys = _pnl_period_summaries()
+    w.writerow([])
+    w.writerow(["CARD & OTHER CHARGES (they eat into profit)"])
+    w.writerow(["Month", "Note", "Amount (Rs)"])
+    for x in sorted(charges_store()["items"], key=lambda z: z.get("date") or ""):
+        w.writerow([(x.get("date") or "")[:7], x.get("note", ""), x.get("amount", "")])
+    for title, pool, label in (("PROFITS MONTH TO MONTH (booked minus charges)", months, "Month"),
+                               ("PROFITS YEAR TO YEAR — FINANCIAL YEAR (Apr-Mar)", fys, "FY"),
+                               ("PROFITS YEAR TO YEAR — CALENDAR YEAR", cys, "Year")):
+        w.writerow([])
+        w.writerow([title])
+        w.writerow([label, "Booked P&L (Rs)", "Charges (Rs)", "Net (Rs)"])
+        tot = [0.0, 0.0]
+        for k in sorted(pool.keys(), reverse=True):
+            b2, c2 = pool[k]
+            tot[0] += b2
+            tot[1] += c2
+            w.writerow([k, round(b2, 2), round(c2, 2), round(b2 - c2, 2)])
+        w.writerow(["TOTAL", round(tot[0], 2), round(tot[1], 2), round(tot[0] - tot[1], 2)])
+    w.writerow([])
+    w.writerow(["(sales without a date are counted in their IPO's listing month)"])
     return Response(buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition":
                              f'attachment; filename="ipo-pnl-{today_str()}.csv"'})
+
+
+# ---- monthly charges (credit-card fees & other recurring costs) -------------
+# Stored in kv: {"items":[{id,date,amount,note,tpl?}], "templates":[{id,amount,note,since}],
+#                "skipped":["<tpl>:<YYYY-MM>", ...]}  -> month entries the user deleted
+
+def charges_store():
+    try:
+        j = json.loads(kv_get("charges", "{}") or "{}")
+    except (TypeError, ValueError):
+        j = {}
+    if not isinstance(j, dict):
+        j = {}
+    j.setdefault("items", [])
+    j.setdefault("templates", [])
+    j.setdefault("skipped", [])
+    return j
+
+
+def _charges_save(j):
+    kv_set("charges", json.dumps(j))
+
+
+def _month_iter(since: str, upto: str):
+    y, m = int(since[:4]), int(since[5:7])
+    for _ in range(24):  # safety cap: at most 24 months of backfill
+        yield f"{y:04d}-{m:02d}"
+        if f"{y:04d}-{m:02d}" >= upto:
+            return
+        m += 1
+        if m == 13:
+            y, m = y + 1, 1
+
+
+def _charges_month_roll():
+    """Materialize recurring templates into one entry per month (filling gaps —
+    a month the app was never opened still owes the card charge)."""
+    j = charges_store()
+    cur = today_str()[:7]
+    changed = False
+    skipped = set(j["skipped"])
+    have = {(x.get("tpl"), (x.get("date") or "")[:7]) for x in j["items"]}
+    for t in j["templates"]:
+        since = (t.get("since") or cur)
+        for m in _month_iter(since, cur):
+            if (t["id"], m) in have or f"{t['id']}:{m}" in skipped:
+                continue
+            j["items"].append({"id": f"{t['id']}-{m}", "date": m + "-01",
+                               "amount": t["amount"], "note": t.get("note", ""),
+                               "tpl": t["id"]})
+            have.add((t["id"], m))
+            changed = True
+    if changed:
+        j["items"].sort(key=lambda x: x.get("date") or "")
+        _charges_save(j)
+
+
+@app.get("/api/charges")
+def list_charges():
+    _charges_month_roll()
+    return charges_store()
+
+
+@app.post("/api/charges")
+def add_charge(b: dict = Body(...)):
+    try:
+        amount = round(float(b.get("amount")), 2)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "amount required")
+    if not amount or amount <= 0:
+        raise HTTPException(400, "amount must be positive")
+    note = str(b.get("note") or "").strip()[:80]
+    month = str(b.get("month") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        month = today_str()[:7]
+    j = charges_store()
+    if b.get("repeat"):
+        tid = "tpl-" + secrets.token_hex(3)
+        j["templates"].append({"id": tid, "amount": amount, "note": note, "since": month})
+        _charges_save(j)
+        _charges_month_roll()
+    else:
+        j["items"].append({"id": "chg-" + secrets.token_hex(3), "date": month + "-01",
+                           "amount": amount, "note": note})
+        j["items"].sort(key=lambda x: x.get("date") or "")
+        _charges_save(j)
+    schedule_backup()
+    return charges_store()
+
+
+@app.delete("/api/charges/item/{cid}")
+def delete_charge_item(cid: str):
+    j = charges_store()
+    victim = next((x for x in j["items"] if x.get("id") == cid), None)
+    if victim and victim.get("tpl"):
+        # remember the deletion so the month roller doesn't recreate it
+        key = f"{victim['tpl']}:{(victim.get('date') or '')[:7]}"
+        if key not in j["skipped"]:
+            j["skipped"].append(key)
+    j["items"] = [x for x in j["items"] if x.get("id") != cid]
+    _charges_save(j)
+    schedule_backup()
+    return charges_store()
+
+
+@app.delete("/api/charges/tpl/{tid}")
+def delete_charge_template(tid: str):
+    """Stop a recurring monthly charge — past month entries stay as history."""
+    j = charges_store()
+    j["templates"] = [t for t in j["templates"] if t.get("id") != tid]
+    _charges_save(j)
+    schedule_backup()
+    return charges_store()
+
+
+def _pnl_period_summaries():
+    """Booked P&L and charges grouped by month / financial year (Apr-Mar,
+    Indian) / calendar year. Used by the CSV export; the UI runs the same
+    math client-side."""
+    ipos_ = {i["id"]: i for i in rows("SELECT * FROM ipos")}
+    apps_ = rows("""SELECT * FROM applications
+                    WHERE applied=1 AND allotment='allotted' AND sell_qty>0""")
+    months = {}
+    for a in apps_:
+        ipo = ipos_.get(a["ipo_id"], {})
+        m = (a.get("sold_on") or ipo.get("listing_date") or "")[:7]
+        if not m:
+            continue
+        qty = a.get("allotted_qty") or 0
+        cost = a["amount"] / qty if qty else 0
+        booked = ((a.get("sell_price") or 0) - cost) * (a.get("sell_qty") or 0)
+        months.setdefault(m, [0.0, 0.0])[0] += booked
+    for x in charges_store()["items"]:
+        m = (x.get("date") or "")[:7]
+        if m:
+            months.setdefault(m, [0.0, 0.0])[1] += float(x.get("amount") or 0)
+
+    def fy(m):
+        y, mm = int(m[:4]), int(m[5:7])
+        s = y if mm >= 4 else y - 1
+        return f"FY {s}-{(s + 1) % 100:02d}"
+
+    fys, cys = {}, {}
+    for m, (b, c) in months.items():
+        for pool, key in ((fys, fy(m)), (cys, m[:4])):
+            o = pool.setdefault(key, [0.0, 0.0])
+            o[0] += b
+            o[1] += c
+    return months, fys, cys
 
 
 @app.post("/api/ipos/{iid}/apply")
