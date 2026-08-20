@@ -100,6 +100,8 @@ a{color:var(--acc)}
    slides sideways like it (sticky # + Applicant columns stay pinned) */
 .acctable{min-width:720px}
 .acctable td{white-space:nowrap}
+/* accounts action buttons always stay in one horizontal line */
+.acctable .row-actions{flex-wrap:nowrap}
 /* applications tab: applicant column stays fixed while the rest slides */
 .apptable td.stick,.apptable th.stick{position:sticky;left:0;background:var(--card);min-width:118px;box-shadow:2px 0 0 var(--line);z-index:3}
 .apptable th.stick{z-index:5}
@@ -330,8 +332,7 @@ window.drawIpoSnap=async()=>{
 function renderDash(){
   const el=document.getElementById('tab-dash');
   const apps=S.applications.filter(a=>a.applied);
-  const blocked=apps.filter(a=>a.mandate_status==='approved'&&a.allotment==='pending').reduce((s,a)=>s+a.amount,0)
-    +apps.filter(a=>a.allotment==='not_allotted'&&a.refund==='pending').reduce((s,a)=>s+a.amount,0);
+  const blocked=apps.filter(a=>a.mandate_status==='approved'&&a.allotment!=='allotted'&&a.refund!=='received').reduce((s,a)=>s+a.amount,0);
   const awaitingRefund=apps.filter(a=>a.allotment==='not_allotted'&&a.refund==='pending').reduce((s,a)=>s+a.amount,0);
   const mandPend=apps.filter(a=>a.mandate_status==='pending');
   const booked=apps.reduce((s,a)=>s+bookedPnl(a),0);
@@ -377,7 +378,7 @@ function renderDash(){
   ${todayStrip}
   <div class="grid-kpi">
     <div class="kpi"><div class="l">IPOs open now</div><div class="v">${openIpos.length}</div><div class="s">${S.ipos.filter(i=>i.status==='upcoming').length} upcoming</div></div>
-    <div class="kpi"><div class="l">Capital blocked</div><div class="v">${kr(blocked)}</div><div class="s">mandates approved, results awaited</div></div>
+    <div class="kpi"><div class="l">Capital blocked</div><div class="v">${kr(blocked)}</div><div class="s">money still blocked in UPI — excludes debited (allotted) & unblocked amounts</div></div>
     <div class="kpi"><div class="l">Refunds pending</div><div class="v" style="color:var(--amb)">${kr(awaitingRefund)}</div><div class="s">not allotted, unblock awaited</div></div>
     <div class="kpi"><div class="l">Mandates to approve</div><div class="v" style="color:${mandPend.length?'var(--red)':'var(--grn)'}">${mandPend.length}</div><div class="s">UPI requests waiting</div></div>
     <div class="kpi"><div class="l">Booked profit</div><div class="v ${pnlCls(booked)}">${pnlTxt(booked)}</div><div class="s">from sold allotments</div></div>
@@ -662,7 +663,7 @@ function renderApps(){
     return;
   }
   const uniqUpis=new Set(applied.map(x=>(x.upi||'').trim().toLowerCase()).filter(Boolean)).size;
-  const blocked=applied.filter(a=>a.mandate_status==='approved'&&a.allotment==='pending').reduce((s,a)=>s+a.amount,0);
+  const blocked=applied.filter(a=>a.mandate_status==='approved'&&a.allotment!=='allotted'&&a.refund!=='received').reduce((s,a)=>s+a.amount,0);
   const allot=applied.filter(a=>a.allotment==='allotted').length;
   const minAmt=ipo.price_max&&ipo.lot_size?ipo.price_max*ipo.lot_size:0;
   el.innerHTML=`
