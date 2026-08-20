@@ -898,7 +898,8 @@ def _ipoji_subs():
                 return float(v)
             except (TypeError, ValueError):
                 return None
-        recs[norm_name(name)] = {"qib": f(cells[2]), "shni": f(cells[3]),
+        recs[norm_name(name)] = {"name": name, "close_txt": cells[1],
+                                 "qib": f(cells[2]), "shni": f(cells[3]),
                                  "bhni": f(cells[4]), "nii": f(cells[5]),
                                  "rii": f(cells[6]), "emp": f(cells[7]),
                                  "others": f(cells[8]), "total": f(cells[9])}

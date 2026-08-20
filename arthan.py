@@ -308,6 +308,40 @@ def stable_board(url, parser, fields, gap=None):
 # main refresh — the heart of the engine
 # ---------------------------------------------------------------------------
 
+def _legacy_gmp_board(s):
+    """IPOJi GMP feed (already the engine's independent cross-check source)
+    reshaped into display-board rows — used only when the IPOWatch board is
+    unavailable AND there is no good cache left to keep."""
+    out = []
+    try:
+        for r in s.scrape_gmp():
+            pmx = r.get("price_max") or 0
+            g = r.get("gmp") or 0
+            out.append({"name": r["name"], "board": r.get("board") or "Mainboard",
+                        "gmp": g, "trend": "", "price": pmx or None,
+                        "est_listing": round(pmx + g, 1) if pmx else None,
+                        "est_pct": round(g / pmx * 100, 1) if pmx else None,
+                        "dates_txt": "", "status": r.get("status") or "",
+                        "updated": "IPOJi backup", "url": r.get("url") or ""})
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _legacy_sub_board(s):
+    """IPOJi subscription feed reshaped into board rows (same fallback rule)."""
+    out = []
+    try:
+        for rec in (s._ipoji_subs() or {}).values():
+            out.append({"name": rec.get("name") or "?", "board": rec.get("board") or "",
+                        "qib": rec.get("qib"), "nii": rec.get("nii"),
+                        "rii": rec.get("rii"), "total": rec.get("total"),
+                        "close_txt": rec.get("close_txt") or "", "updated": "IPOJi backup"})
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def refresh_market(force=False, gap=None):
     s = _srv()
     now = s.ist_now().isoformat(timespec="seconds")
@@ -336,11 +370,23 @@ def refresh_market(force=False, gap=None):
     except Exception:  # noqa: BLE001 - optional source
         kostak_board = {}
 
-    # cache full boards for the Market tab (mainboard rows first)
+    # cache full boards for the Market tab (mainboard rows first).
+    # HARD RULE: a failed/empty fetch never wipes a good cached board — the
+    # tab keeps last-known rows (with their true timestamp). If there is no
+    # good cache at all, build a fallback board from the in-server IPOJi
+    # feeds so the Market tab still works while IPOWatch is down.
     for kv_key, board in ((GMP_BOARD_KV, gmp_board), (SUB_BOARD_KV, sub_board)):
         try:
             rows_sorted = sorted(board.values(),
                                  key=lambda r: (r.get("board") != "Mainboard", r.get("name", "")))
+            if not rows_sorted:
+                prev = json.loads(s.kv_get(kv_key, "{}") or "{}")
+                if prev.get("rows"):
+                    continue  # keep last good board; the error is already recorded
+                legacy = _legacy_gmp_board(s) if kv_key == GMP_BOARD_KV else _legacy_sub_board(s)
+                if not legacy:
+                    continue
+                rows_sorted = legacy
             s.kv_set(kv_key, json.dumps({"at": now, "rows": rows_sorted})[:60000])
         except Exception:  # noqa: BLE001
             pass
