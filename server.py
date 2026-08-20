@@ -249,6 +249,26 @@ def schedule_backup():
     _bak_timer.start()
 
 
+def backup_now():
+    """Immediate (synchronous) backup — for sensitive one-time config changes
+    (passcode, fingerprint credential) where even the normal ~25 s debounce
+    window is too long: a free-host restart inside that window would silently
+    roll the change back once the older backup is restored."""
+    try:
+        payload = json.dumps(export_backup(), ensure_ascii=False)
+        try:
+            LOCAL_BACKUP.write_text(payload, encoding="utf-8")
+        except Exception:
+            pass
+        if _GH_TOKEN and _GH_REPO:
+            try:
+                _github_push(payload)
+            except Exception as e:
+                print("[backup] instant GitHub push failed (local copy kept):", e, flush=True)
+    except Exception as e:
+        print("[backup] instant backup failed:", e, flush=True)
+
+
 def boot_restore():
     with LOCK, get_db() as con:
         n = con.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"]
@@ -261,14 +281,24 @@ def boot_restore():
                 candidates.append((label, json.loads(path.read_text(encoding="utf-8"))))
         except Exception:
             pass
+    # restore the NEWEST payload available, never just the first working one —
+    # an older restore that later gets auto-pushed would silently roll newer
+    # data back (this is how a passcode change once got wiped).
+
+    def _exported_at(item):
+        try:
+            return (item[1] or {}).get("exported_at") or ""
+        except Exception:
+            return ""
+    candidates = sorted((c for c in candidates if c[1]), key=_exported_at, reverse=True)
     for label, payload in candidates:
-        if payload:
-            try:
-                counts = restore_backup(payload)
-                print(f"[backup] restored from {label}: {counts}", flush=True)
-                return
-            except Exception as e:
-                print(f"[backup] restore from {label} failed: {e}", flush=True)
+        try:
+            counts = restore_backup(payload)
+            print(f"[backup] restored from {label} (export {(payload.get('exported_at') or '?')[:19]}): {counts}",
+                  flush=True)
+            return
+        except Exception as e:
+            print(f"[backup] restore from {label} failed: {e}", flush=True)
     print("[backup] empty DB and no backup found — starting fresh", flush=True)
 
 
@@ -1189,10 +1219,9 @@ CONF_FILE = DATA / "config.json"
 if CONF_FILE.exists():
     CONF = json.loads(CONF_FILE.read_text())
 else:
-    CONF = {"passcode": secrets.token_hex(3)}
-    print(f"[boot] FIRST-RUN PASSCODE: {CONF['passcode']} — find this in the hosting "
-          "logs, set your own via the PASSCODE environment variable, or change it "
-          "in-app (Dashboard → passcode card).", flush=True)
+    CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}  # random 6-digit first-run code
+    print(f"[boot] FIRST-RUN PASSCODE for this install: {CONF['passcode']} - log in once, "
+          "then set a memorable one inside the app (App passcode card).", flush=True)
     try:
         CONF_FILE.write_text(json.dumps(CONF))
     except Exception:
@@ -1218,7 +1247,7 @@ def _passcode() -> str:
 def _auth_token() -> str:
     return hashlib.sha256((_passcode() + "-ipo-center").encode()).hexdigest()[:48]
 
-UNLOCK_HTML = """<!DOCTYPE html><html><head><script>try{if(localStorage.getItem("ic-theme")==="light")document.documentElement.dataset.theme="light";}catch(_){}</script><meta charset="utf-8">
+UNLOCK_HTML = r"""<!DOCTYPE html><html><head><script>try{if(localStorage.getItem("ic-theme")==="light")document.documentElement.dataset.theme="light";}catch(_){}</script><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>IPO Center — Unlock</title>
 <style>
 :root{--bg:#0b1220;--card:#121b2e;--line:#243150;--txt:#e6ecf5;--mut:#8b9bb5;--acc:#4f8cff;--input:#0e1730;--red:#ef4444}
@@ -1373,9 +1402,48 @@ def _wa_cred():
         return None
 
 
+def _wa_challenge():
+    """Start a fresh login/registration ceremony. The state is stored in the
+    exact shape fido2 (v1.1.x) reads back in register/authenticate_complete:
+    a websafe-base64-encoded challenge and a user_verification entry."""
+    from fido2.utils import websafe_encode
+    challenge = secrets.token_bytes(32)
+    state = {"challenge": websafe_encode(challenge), "user_verification": "preferred"}
+    kv_set("wa_state", json.dumps({"state": state, "ts": time.time()}))
+    return challenge
+
+
+def _wa_state(max_age: int = 300):
+    try:
+        st = json.loads(kv_get("wa_state", "null") or "null")
+    except (TypeError, ValueError):
+        return None
+    if not st or time.time() - st.get("ts", 0) > max_age:
+        return None
+    return st.get("state")
+
+
+def _wa_err(phase: str, e: Exception):
+    """Remember the last ceremony failure (visible via /api/webauthn/diag) so a
+    phone-only user can be debugged without server-log access."""
+    try:
+        kv_set("wa_lasterr", json.dumps({
+            "phase": phase, "err": f"{e.__class__.__name__}: {str(e)[:200]}",
+            "at": ist_now().isoformat(timespec="seconds")}))
+    except Exception:
+        pass
+
+
 @app.get("/api/webauthn/status")
 def wa_status():
     return {"enabled": _wa_cred() is not None}
+
+
+@app.get("/api/webauthn/diag")
+def wa_diag(request: Request):
+    return {"registered": _wa_cred() is not None,
+            "rp_id": request.url.hostname,
+            "last_error": json.loads(kv_get("wa_lasterr", "null") or "null")}
 
 
 @app.post("/api/webauthn/register/options")
@@ -1383,8 +1451,7 @@ def wa_register_options(request: Request):
     srv = _wa_server(request.url.hostname)
     if srv is None:
         raise HTTPException(503, "biometric library unavailable on server")
-    challenge = secrets.token_bytes(32)
-    kv_set("wa_state", json.dumps({"challenge": _b64e(challenge), "ts": time.time()}))
+    challenge = _wa_challenge()
     return {"challenge": _b64e(challenge), "rp": {"name": "IPO Command Center"},
             "user": {"id": _b64e(b"owner"), "name": "owner", "displayName": "Owner"},
             "pubKeyCredParams": [{"type": "public-key", "alg": -7},
@@ -1397,19 +1464,28 @@ def wa_register_options(request: Request):
 @app.post("/api/webauthn/register/verify")
 def wa_register_verify(request: Request, b: dict = Body(...)):
     srv = _wa_server(request.url.hostname)
-    st = json.loads(kv_get("wa_state", "null") or "null")
-    if srv is None or not st or time.time() - st.get("ts", 0) > 300:
-        raise HTTPException(400, "registration session expired — tap again")
+    state = _wa_state()
+    if srv is None or state is None:
+        raise HTTPException(400, "registration session expired — tap the button again")
     try:
-        out = srv.register_complete(
-            {"challenge": _b64d(st["challenge"])},
-            _b64d(b["clientDataJSON"]), _b64d(b["attestationObject"]))
+        from fido2.webauthn import CollectedClientData, AttestationObject
+        import fido2.cbor as cbor
+        auth_data = srv.register_complete(
+            state,
+            CollectedClientData(_b64d(b["clientDataJSON"])),
+            AttestationObject(_b64d(b["attestationObject"])))
+        cd = auth_data.credential_data
+        if cd is None:
+            raise ValueError("authenticator sent no credential data")
+        kv_set("wa_cred", json.dumps({"cred_id": _b64e(cd.credential_id),
+                                      "key": _b64e(cbor.encode(cd.public_key))}))
+        kv_set("wa_state", "null")
+        kv_set("wa_lasterr", "null")
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(400, f"could not register ({e.__class__.__name__})")
-    cd = out.credential_data
-    kv_set("wa_cred", json.dumps({"cred_id": _b64e(cd.credential_id),
-                                  "key": _b64e(cd.public_key)}))
-    kv_set("wa_state", "null")
+        _wa_err("register", e)
+        raise HTTPException(400, f"server rejected this fingerprint ({e.__class__.__name__}: {str(e)[:90]})")
+    schedule_backup()
+    backup_now()  # never lose the credential to a free-host restart
     return {"ok": True}
 
 
@@ -1417,9 +1493,8 @@ def wa_register_verify(request: Request, b: dict = Body(...)):
 def wa_login_options(request: Request):
     cred = _wa_cred()
     if not cred:
-        raise HTTPException(404, "no fingerprint registered")
-    challenge = secrets.token_bytes(32)
-    kv_set("wa_state", json.dumps({"challenge": _b64e(challenge), "ts": time.time()}))
+        raise HTTPException(404, "no fingerprint registered on this server")
+    challenge = _wa_challenge()
     return {"challenge": _b64e(challenge), "timeout": 60000,
             "userVerification": "preferred",
             "allowCredentials": [{"type": "public-key", "id": cred["cred_id"]}]}
@@ -1429,19 +1504,23 @@ def wa_login_options(request: Request):
 def wa_login_verify(request: Request, b: dict = Body(...)):
     srv = _wa_server(request.url.hostname)
     cred = _wa_cred()
-    st = json.loads(kv_get("wa_state", "null") or "null")
-    if srv is None or not cred or not st or time.time() - st.get("ts", 0) > 180:
-        raise HTTPException(400, "no active fingerprint challenge")
+    state = _wa_state(180)
+    if srv is None or not cred or state is None:
+        raise HTTPException(400, "no active fingerprint challenge — tap again")
     try:
-        from fido2.webauthn import PublicKeyCredentialDescriptor
-        srv.authenticate_complete(
-            {"challenge": _b64d(st["challenge"])},
-            [PublicKeyCredentialDescriptor(type="public-key",
-                                           id=_b64d(cred["cred_id"]))],
-            _b64d(cred["key"]),
-            _b64d(b["clientDataJSON"]), _b64d(b["authenticatorData"]),
-            _b64d(b["signature"]))
+        from fido2.webauthn import (CollectedClientData, AuthenticatorData,
+                                    AttestedCredentialData, Aaguid)
+        from fido2.cose import CoseKey
+        import fido2.cbor as cbor
+        key = CoseKey.parse(cbor.decode(_b64d(cred["key"])))
+        stored = AttestedCredentialData.create(Aaguid.NONE, _b64d(cred["cred_id"]), key)
+        srv.authenticate_complete(state, [stored],
+                                  _b64d(cred["cred_id"]),
+                                  CollectedClientData(_b64d(b["clientDataJSON"])),
+                                  AuthenticatorData(_b64d(b["authenticatorData"])),
+                                  _b64d(b["signature"]))
     except Exception as e:  # noqa: BLE001
+        _wa_err("login", e)
         raise HTTPException(401, f"fingerprint check failed ({e.__class__.__name__})")
     kv_set("wa_state", "null")
     resp = JSONResponse({"ok": True})
@@ -1452,7 +1531,7 @@ def wa_login_verify(request: Request, b: dict = Body(...)):
 
 
 @app.post("/api/passcode")
-def change_passcode(b: dict = Body(...)):
+def change_passcode(request: Request, b: dict = Body(...)):
     """In-app passcode change (survives redeploys via the GitHub backup)."""
     if _ENV_PASSCODE:
         raise HTTPException(400, "passcode is pinned by the server's PASSCODE setting — change it in the hosting dashboard instead")
@@ -1464,7 +1543,14 @@ def change_passcode(b: dict = Body(...)):
         raise HTTPException(400, "new passcode must be exactly 6 digits")
     kv_set("app_passcode", new)
     schedule_backup()
-    return {"ok": True}
+    backup_now()  # never lose a passcode change to a free-host restart
+    # keep THIS device logged in: re-issue its cookie against the new code
+    # (every other signed-in device is logged out and will need the new code)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie("ipo_auth", _auth_token(), max_age=30 * 86400,
+                    httponly=True, samesite="lax",
+                    secure=(request.url.scheme == "https"))
+    return resp
 
 
 @app.get("/healthz")

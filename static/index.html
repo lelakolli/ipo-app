@@ -412,6 +412,7 @@ function renderDash(){
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <input id="pc-cur" inputmode="numeric" maxlength="6" placeholder="current 6-digit" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
       <input id="pc-new" inputmode="numeric" maxlength="6" placeholder="new 6-digit" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
+      <input id="pc-new2" inputmode="numeric" maxlength="6" placeholder="repeat new" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
       <button class="btn sm" onclick="changePass()">Change passcode</button>
       <button class="btn sm ghost" onclick="fpRegister()" title="Unlock this app with your phone's fingerprint / screen lock">👆 Register fingerprint unlock</button>
     </div>
@@ -430,11 +431,13 @@ window.restoreBackup=async(inp)=>{
   }catch(e){alert('Restore failed: '+e.message);}
 };
 window.changePass=async()=>{
-  const cur=document.getElementById('pc-cur').value.trim(),nw=document.getElementById('pc-new').value.trim();
+  const cur=document.getElementById('pc-cur').value.trim(),nw=document.getElementById('pc-new').value.trim(),nw2=document.getElementById('pc-new2').value.trim();
   if(!/^\d{6}$/.test(cur)||!/^\d{6}$/.test(nw))return toast('Both must be 6-digit numbers',1);
+  if(nw!==nw2)return toast('The two new passcodes do not match — retype them carefully',1);
+  if(nw===cur)return toast('New passcode is the same as the current one',1);
   await api('/api/passcode','POST',{current:cur,new:nw});
-  toast('✅ Passcode changed — saved permanently');
-  document.getElementById('pc-cur').value='';document.getElementById('pc-new').value='';};
+  toast('✅ Passcode changed & saved — this phone stays logged in, other devices will need the new code');
+  document.getElementById('pc-cur').value='';document.getElementById('pc-new').value='';document.getElementById('pc-new2').value='';};
 window.goApps=(id,check)=>{selIpo=id;curTab='apps';
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x.dataset.tab==='apps'));
   document.querySelectorAll('main section').forEach(s=>s.style.display='none');
@@ -728,18 +731,21 @@ window.applyAll=async()=>{
 function _bufToB64(b){return btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 window.fpRegister=async()=>{
   if(!('credentials' in navigator)||!window.PublicKeyCredential)return toast('This browser does not support biometrics',1);
+  const o=await api('/api/webauthn/register/options','POST',{});
+  let cred;
   try{
-    const o=await api('/api/webauthn/register/options','POST',{});
-    const cred=await navigator.credentials.create({publicKey:{
+    cred=await navigator.credentials.create({publicKey:{
       challenge:_b64u8(o.challenge),rp:o.rp,
       user:{id:_b64u8(o.user.id),name:o.user.name,displayName:o.user.displayName},
       pubKeyCredParams:o.pubKeyCredParams,timeout:o.timeout,
       authenticatorSelection:o.authenticatorSelection}});
-    await api('/api/webauthn/register/verify','POST',{id:cred.id,
-      clientDataJSON:_bufToB64(cred.response.clientDataJSON),
-      attestationObject:_bufToB64(cred.response.attestationObject)});
-    toast('👆 Fingerprint unlock enabled on this phone ✅');
-  }catch(e){toast('Fingerprint setup cancelled or failed',1);}
+  }catch(e){return toast('Fingerprint prompt cancelled — tap the button again to retry',1);}
+  if(!cred)return toast('Fingerprint prompt cancelled — tap the button again to retry',1);
+  const v=await api('/api/webauthn/register/verify','POST',{id:cred.id,
+    clientDataJSON:_bufToB64(cred.response.clientDataJSON),
+    attestationObject:_bufToB64(cred.response.attestationObject)});
+  // if the server rejects it, api() already shows the exact reason
+  if(v&&v.ok)toast('👆 Fingerprint unlock enabled on this phone ✅');
 };
 window.toggleTheme=()=>{const el=document.documentElement;const light=el.dataset.theme!=='light';
   el.dataset.theme=light?'light':'';
