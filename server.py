@@ -1662,7 +1662,8 @@ def state():
         agg = rows("""SELECT COUNT(*) applied_cnt,
                              SUM(CASE WHEN mandate_status='approved'
                                        AND allotment<>'allotted'
-                                       AND refund<>'received' THEN amount ELSE 0 END) blocked_amd,
+                                       AND refund<>'received'
+                                       AND COALESCE(sell_qty,0)=0 THEN amount ELSE 0 END) blocked_amd,
                              SUM(CASE WHEN allotment='allotted' THEN allotted_qty ELSE 0 END) allotted_qty,
                              SUM(CASE WHEN allotment='allotted' THEN amount ELSE 0 END) invested
                       FROM applications WHERE ipo_id=? AND applied=1""", (i["id"],))[0]

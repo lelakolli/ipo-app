@@ -46,6 +46,8 @@ nav button.on{background:var(--acc);color:#fff}
 main{padding:20px 22px;max-width:1500px;margin:0 auto}
 .grid-kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
 .kpi{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:14px 16px}
+.kpi[onclick]{cursor:pointer;transition:border-color .15s}
+.kpi[onclick]:hover{border-color:var(--acc)}
 .kpi .l{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.6px}
 .kpi .v{font-size:21px;font-weight:700;margin-top:5px}
 .kpi .s{font-size:12px;color:var(--mut);margin-top:3px}
@@ -332,8 +334,10 @@ window.drawIpoSnap=async()=>{
 function renderDash(){
   const el=document.getElementById('tab-dash');
   const apps=S.applications.filter(a=>a.applied);
-  const blocked=apps.filter(a=>a.mandate_status==='approved'&&a.allotment!=='allotted'&&a.refund!=='received').reduce((s,a)=>s+a.amount,0);
+  const blocked=apps.filter(a=>a.mandate_status==='approved'&&a.allotment!=='allotted'&&a.refund!=='received'&&!(a.sell_qty>0)).reduce((s,a)=>s+a.amount,0);
   const awaitingRefund=apps.filter(a=>a.allotment==='not_allotted'&&a.refund==='pending').reduce((s,a)=>s+a.amount,0);
+  const debited=apps.filter(a=>a.allotment==='allotted').reduce((s,a)=>s+a.amount,0);
+  const soldBack=apps.filter(a=>a.allotment==='allotted').reduce((s,a)=>s+(a.sell_qty||0)*(a.sell_price||0),0);
   const mandPend=apps.filter(a=>a.mandate_status==='pending');
   const booked=apps.reduce((s,a)=>s+bookedPnl(a),0);
   const unreal=apps.reduce((s,a)=>s+unrealPnl(a,ipoById(a.ipo_id)||{cmp:0}),0);
@@ -374,15 +378,16 @@ function renderDash(){
     pills.map(p=>`<div class="tpill ${p.cls||''}" ${p.act?`onclick="${p.act}"`:''}><span style="font-size:20px">${p.ic}</span><span><div style="font-size:13px;font-weight:600;white-space:nowrap">${p.t}</div><div class="mut" style="font-size:11px;white-space:nowrap">${p.s}</div></span></div>`).join('')}</div>`:'';
 
   el.innerHTML=`
-  <div class="info">💡 Allotment is <b>PAN-based</b> — keep one unique PAN per account or exchanges reject duplicate bids. This app never asks for your demat/broker passwords; allotment checks use only PAN / CDSL BO ID (public registrar data).</div>
+  <div class="info">💡 Allotment is <b>PAN-based</b> — keep one unique PAN per account or exchanges reject duplicate bids. This app never asks for your demat/broker passwords; allotment checks use only PAN / CDSL BO ID (public registrar data). <b>Tap any summary box below for its full break-up.</b></div>
   ${todayStrip}
   <div class="grid-kpi">
-    <div class="kpi"><div class="l">IPOs open now</div><div class="v">${openIpos.length}</div><div class="s">${S.ipos.filter(i=>i.status==='upcoming').length} upcoming</div></div>
-    <div class="kpi"><div class="l">Capital blocked</div><div class="v">${kr(blocked)}</div><div class="s">money still blocked in UPI — excludes debited (allotted) & unblocked amounts</div></div>
-    <div class="kpi"><div class="l">Refunds pending</div><div class="v" style="color:var(--amb)">${kr(awaitingRefund)}</div><div class="s">not allotted, unblock awaited</div></div>
-    <div class="kpi"><div class="l">Mandates to approve</div><div class="v" style="color:${mandPend.length?'var(--red)':'var(--grn)'}">${mandPend.length}</div><div class="s">UPI requests waiting</div></div>
-    <div class="kpi"><div class="l">Booked profit</div><div class="v ${pnlCls(booked)}">${pnlTxt(booked)}</div><div class="s">from sold allotments</div></div>
-    <div class="kpi"><div class="l">Unrealized P&L</div><div class="v ${pnlCls(unreal)}">${pnlTxt(unreal)}</div><div class="s">open allotment positions at CMP</div></div>
+    <div class="kpi" onclick="dashDrill('open')" title="Tap for the list"><div class="l">IPOs open now</div><div class="v">${openIpos.length}</div><div class="s">${S.ipos.filter(i=>i.status==='upcoming').length} upcoming • tap for details</div></div>
+    <div class="kpi" onclick="dashDrill('blocked')" title="Tap for the break-up"><div class="l">Capital blocked</div><div class="v">${kr(blocked)}</div><div class="s">money still blocked in UPI — excludes debited (allotted), unblocked & sold-back amounts</div></div>
+    <div class="kpi" onclick="dashDrill('debit')" title="Tap for the break-up"><div class="l">Amount debited (allotted)</div><div class="v">${kr(debited)}</div><div class="s">${kr(soldBack)} recovered via sales so far</div></div>
+    <div class="kpi" onclick="dashDrill('refund')" title="Tap for the list"><div class="l">Refunds pending</div><div class="v" style="color:var(--amb)">${kr(awaitingRefund)}</div><div class="s">not allotted, unblock awaited</div></div>
+    <div class="kpi" onclick="dashDrill('mandate')" title="Tap for the list"><div class="l">Mandates to approve</div><div class="v" style="color:${mandPend.length?'var(--red)':'var(--grn)'}">${mandPend.length}</div><div class="s">UPI requests waiting</div></div>
+    <div class="kpi" onclick="dashDrill('booked')" title="Tap for the break-up"><div class="l">Booked profit</div><div class="v ${pnlCls(booked)}">${pnlTxt(booked)}</div><div class="s">from sold allotments</div></div>
+    <div class="kpi" onclick="dashDrill('unreal')" title="Tap for the break-up"><div class="l">Unrealized P&L</div><div class="v ${pnlCls(unreal)}">${pnlTxt(unreal)}</div><div class="s">open allotment positions at CMP</div></div>
   </div>
   <div class="two">
     <div class="card"><h3>⚡ Needs your action <small>(${acts.length})</small></h3>
@@ -447,6 +452,83 @@ window.changePass=async()=>{
   await api('/api/passcode','POST',{current:cur,new:nw});
   toast('✅ Passcode changed & saved — this phone stays logged in, other devices will need the new code');
   document.getElementById('pc-cur').value='';document.getElementById('pc-new').value='';document.getElementById('pc-new2').value='';};
+// tap a dashboard summary box -> full break-up of what makes that number
+window.dashDrill=(kind)=>{
+  const apps=S.applications.filter(a=>a.applied);
+  const rowApp=(a,sub)=>{const i=ipoById(a.ipo_id)||{},ac=accById(a.account_id)||{};
+    return `<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 2px;border-bottom:1px solid var(--line);align-items:center">
+      <div><b>${esc(ac.holder||'?')}</b> — ${esc(i.name||'?')}<br>
+      <span class="mut" style="font-size:11.5px">${sub||''}${rs(a.amount)}${a.upi?` • <code>${esc(a.upi)}</code>`:''}</span></div>
+      ${i.id?`<button class="btn sm ghost" onclick="closeModal();goApps(${i.id})">Open</button>`:''}</div>`;};
+  let title='',body='',foot='';
+  if(kind==='open'){
+    title='🟢 IPOs open & upcoming';
+    const mk=i=>{const n=S.applications.filter(x=>x.ipo_id===i.id&&x.applied).length;
+      return `<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 2px;border-bottom:1px solid var(--line);align-items:center">
+        <div><b>${esc(i.name)}</b> ${i.gmp?`<span class="chip c-listed">GMP ₹${num(i.gmp)}</span>`:''}<br>
+        <span class="mut" style="font-size:11.5px">${fd(i.open_date)} → closes ${fd(i.close_date)} • applied ${n}/${S.accounts.filter(a=>a.active).length} accounts</span></div>
+        <button class="btn sm" onclick="closeModal();goApps(${i.id})">Apply / track</button></div>`;};
+    const openL=S.ipos.filter(i=>i.status==='open'),upc=S.ipos.filter(i=>i.status==='upcoming');
+    body=(openL.map(mk).join('')||'<div class="mut">Nothing open right now.</div>')
+       +(upc.length?`<div class="mut" style="font-weight:700;margin:12px 0 4px;font-size:12px">UPCOMING</div>`+upc.map(mk).join(''):'');
+  }else if(kind==='blocked'){
+    const rows=apps.filter(a=>a.mandate_status==='approved'&&a.allotment!=='allotted'&&a.refund!=='received'&&!(a.sell_qty>0));
+    const tot=rows.reduce((s,a)=>s+a.amount,0);
+    title=`💸 Capital blocked — ${kr(tot)}`;
+    foot='Not counted: allotted (debited = invested), unblocked (refund received) and fully/ partly sold amounts.';
+    body=rows.map(a=>{const i=ipoById(a.ipo_id)||{};
+      const st=a.allotment==='not_allotted'?'not allotted — refund awaited':'mandate approved — result awaited';
+      const warn=(i.status==='listed')?'⚠️ IPO already listed — mark the real result in Applications • ':'';
+      return rowApp(a,warn+st+' • ');}).join('')||'<div class="mut">Nothing blocked right now 🎉</div>';
+  }else if(kind==='debit'){
+    const rows=apps.filter(a=>a.allotment==='allotted');
+    const tot=rows.reduce((s,a)=>s+a.amount,0),rb=rows.reduce((s,a)=>s+(a.sell_qty||0)*(a.sell_price||0),0);
+    title=`🏦 Debited on allotment — ${kr(tot)}`;
+    foot=`Across ${rows.length} allotment(s) • recovered via recorded sales: ${kr(rb)} • still out in unsold shares: ${kr(Math.max(0,tot-rb))} (at issue price)`;
+    body=rows.map(a=>{const back=(a.sell_qty||0)*(a.sell_price||0);
+      return rowApp(a,back?`back via sales ${rs(back)} • `:'unsold yet • ');}).join('')
+      ||'<div class="mut">No debits yet — nothing allotted so far.</div>';
+  }else if(kind==='refund'){
+    const rows=apps.filter(a=>a.allotment==='not_allotted'&&a.refund==='pending');
+    const tot=rows.reduce((s,a)=>s+(a.amount||0),0);
+    title=`💳 Refunds pending — ${kr(tot)}`;
+    foot='Bank-side unblocks land 1–2 days after non-allotment. When money hits the bank: open the IPO → tap "🔓 All funds unblocked".';
+    body=rows.map(a=>rowApp(a,'unblock awaited • ')).join('')||'<div class="mut">No pending refunds 🎉</div>';
+  }else if(kind==='mandate'){
+    const rows=apps.filter(a=>a.mandate_status==='pending');
+    const tot=rows.reduce((s,a)=>s+(a.amount||0),0);
+    title=`⏳ Mandates to approve — ${rows.length} (${kr(tot)})`;
+    foot='Approve the UPI collect requests on each phone before the issue closes.';
+    body=rows.map(a=>rowApp(a,'waiting for UPI approval • ')).join('')||'<div class="mut">No mandates waiting 🎉</div>';
+  }else if(kind==='booked'){
+    const byI={};apps.forEach(a=>{const b=bookedPnl(a);if(!b)return;const i=ipoById(a.ipo_id)||{name:'?'};
+      (byI[a.ipo_id]=byI[a.ipo_id]||{n:i.name,v:0,id:a.ipo_id}).v+=b;});
+    const keys=Object.keys(byI).sort((x,y)=>byI[y].v-byI[x].v);
+    const tot=keys.reduce((s,k)=>s+byI[k].v,0);
+    title=`💰 Booked profit — ${pnlTxt(tot)}`;
+    foot='Profit locked in from shares actually sold (sell qty × price in Applications).';
+    body=keys.map(k=>`<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 2px;border-bottom:1px solid var(--line);align-items:center">
+      <b>${esc(byI[k].n)}</b>
+      <span style="display:flex;align-items:center;gap:8px"><span class="${pnlCls(byI[k].v)}" style="font-weight:700">${pnlTxt(byI[k].v)}</span>
+      <button class="btn sm ghost" onclick="closeModal();goApps(${byI[k].id})">Open</button></span></div>`).join('')
+      ||'<div class="mut">Nothing sold yet.</div>';
+  }else if(kind==='unreal'){
+    const rows=apps.filter(a=>a.allotment==='allotted'&&(a.allotted_qty||0)>(a.sell_qty||0));
+    const tot=rows.reduce((s,a)=>s+unrealPnl(a,ipoById(a.ipo_id)||{cmp:0}),0);
+    title=`📈 Unrealized P&L — ${pnlTxt(tot)}`;
+    foot='Shares still held, valued at CMP. To refresh CMP: IPOs tab → Edit → set CMP (or it auto-updates near listing).';
+    body=rows.map(a=>{const i=ipoById(a.ipo_id)||{},ac=accById(a.account_id)||{};
+      const oq=(a.allotted_qty||0)-(a.sell_qty||0),u=unrealPnl(a,i);
+      return `<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 2px;border-bottom:1px solid var(--line);align-items:center">
+      <div><b>${esc(ac.holder||'?')}</b> — ${esc(i.name||'?')}<br>
+      <span class="mut" style="font-size:11.5px">${oq} sh open ${i.cmp?`@ CMP ₹${num(i.cmp)}`:'• CMP not set'}</span></div>
+      <span class="${pnlCls(u)}" style="font-weight:700">${i.cmp?pnlTxt(u):'—'}</span></div>`;}).join('')
+      ||'<div class="mut">No open positions — everything allotted is sold.</div>';
+  }else{return;}
+  openModal(`<h3>${title}</h3><div style="max-height:62vh;overflow:auto">${body}</div>
+    ${foot?`<div class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.5">${foot}</div>`:''}
+    <div class="foot"><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
+};
 window.goApps=(id,check)=>{selIpo=id;curTab='apps';
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x.dataset.tab==='apps'));
   document.querySelectorAll('main section').forEach(s=>s.style.display='none');
@@ -663,7 +745,7 @@ function renderApps(){
     return;
   }
   const uniqUpis=new Set(applied.map(x=>(x.upi||'').trim().toLowerCase()).filter(Boolean)).size;
-  const blocked=applied.filter(a=>a.mandate_status==='approved'&&a.allotment!=='allotted'&&a.refund!=='received').reduce((s,a)=>s+a.amount,0);
+  const blocked=applied.filter(a=>a.mandate_status==='approved'&&a.allotment!=='allotted'&&a.refund!=='received'&&!(a.sell_qty>0)).reduce((s,a)=>s+a.amount,0);
   const allot=applied.filter(a=>a.allotment==='allotted').length;
   const minAmt=ipo.price_max&&ipo.lot_size?ipo.price_max*ipo.lot_size:0;
   el.innerHTML=`
