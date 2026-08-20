@@ -205,6 +205,8 @@ const pnlTxt=n=>(n>0?'+':'')+kr(n);
 const MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const fd=d=>{if(!d)return'—';const[y,m,dd]=d.split('-');return `${+dd} ${MONTHS[+m-1]}`;};
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// esc + JS-string escaping — for names dropped inside single-quoted onclick args
+const jsq=s=>esc(String(s??'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"));
 let toastTm=null;
 function toast(msg,bad){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';
   t.style.borderColor=bad?'var(--red)':'var(--grn)';clearTimeout(toastTm);toastTm=setTimeout(()=>t.style.display='none',3200);}
@@ -372,7 +374,7 @@ function renderDash(){
   const rfp=apps.filter(a=>a.allotment==='not_allotted'&&a.refund==='pending');
   if(rfp.length)pills.push({ic:'🔓',t:`${rfp.length} refunds pending`,s:kr(rfp.reduce((s,a)=>s+a.amount,0))+' to unblock',act:`goApps(${rfp[0].ipo_id})`});
   const mp=apps.filter(a=>a.mandate_status==='pending'&&(ipoById(a.ipo_id)||{}).status==='open');
-  if(mp.length)pills.push({ic:'⏳',t:`${mp.length} UPI mandates waiting`,s:'approve on the phones',cls:'neg'});
+  if(mp.length)pills.push({ic:'⏳',t:`${mp.length} UPI mandates waiting`,s:'approve on the phones — tap to open',cls:'neg',act:`goApps(${mp[0].ipo_id})`});
   const todayStrip=pills.length?`<div class="mut" style="font-size:11.5px;font-weight:700;letter-spacing:.6px;margin:4px 0 6px">📌 TODAY</div>
     <div style="display:flex;gap:8px;overflow-x:auto;padding:0 0 10px;-webkit-overflow-scrolling:touch">${
     pills.map(p=>`<div class="tpill ${p.cls||''}" ${p.act?`onclick="${p.act}"`:''}><span style="font-size:20px">${p.ic}</span><span><div style="font-size:13px;font-weight:600;white-space:nowrap">${p.t}</div><div class="mut" style="font-size:11px;white-space:nowrap">${p.s}</div></span></div>`).join('')}</div>`:'';
@@ -571,7 +573,7 @@ function renderIpos(){
       ${i.status==='result_pending'?`<button class="btn sm warn" onclick="goApps(${i.id},true)">Check allotment</button>`:''}
       ${i.status==='listed'?`<button class="btn sm ghost" onclick="fetchCmp(${i.id})" title="Fetch live price now">↻ CMP</button>`:''}
       <button class="btn sm ghost" onclick="ipoModal(${i.id})">Edit</button>
-      <button class="btn sm danger" onclick="delIpo(${i.id},'${esc(i.name)}')">✕</button>
+      <button class="btn sm danger" onclick="delIpo(${i.id},'${jsq(i.name)}')">✕</button>
     </div>
   </div>`;};
   const live=S.ipos.filter(i=>!archivable(i));
@@ -653,7 +655,7 @@ function renderAccounts(){
     <button class="btn sm ghost" onclick="moveAcc(${a.id},-1)" title="Move up in the list">▲</button>
     <button class="btn sm ghost" onclick="moveAcc(${a.id},1)" title="Move down in the list">▼</button>
     <button class="btn sm ghost" onclick="accModal(${a.id})">Edit</button>
-    <button class="btn sm danger" onclick="delAcc(${a.id},'${esc(a.holder)}')">✕</button></td></tr>`;}).join('')
+    <button class="btn sm danger" onclick="delAcc(${a.id},'${jsq(a.holder)}')">✕</button></td></tr>`;}).join('')
     ||'<tr><td colspan="8" class="mut">No accounts yet — add your 15+ demat accounts here.</td></tr>'}
   </tbody></table></div></div>`;
 }

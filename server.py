@@ -14,6 +14,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import atexit
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -162,6 +163,7 @@ _GH_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 _GH_REPO = os.environ.get("GITHUB_REPO", "").strip()  # "username/repo"
 _GH_PATH = "data/live-backup.json"
 _bak_timer = None
+_bak_pending = False
 
 
 def export_backup() -> dict:
@@ -224,6 +226,7 @@ def _github_fetch():
 
 
 def _do_backup():
+    global _bak_pending
     try:
         payload = json.dumps(export_backup(), ensure_ascii=False)
         try:
@@ -233,6 +236,7 @@ def _do_backup():
         if _GH_TOKEN and _GH_REPO:
             try:
                 _github_push(payload)
+                _bak_pending = False
                 print("[backup] pushed to GitHub", flush=True)
             except Exception as e:
                 print("[backup] GitHub push failed (local copy kept):", e, flush=True)
@@ -241,12 +245,30 @@ def _do_backup():
 
 
 def schedule_backup():
-    global _bak_timer
+    global _bak_timer, _bak_pending
+    _bak_pending = True
     if _bak_timer and _bak_timer.is_alive():
         return
     _bak_timer = threading.Timer(25.0, _do_backup)
     _bak_timer.daemon = True
     _bak_timer.start()
+
+
+def _flush_backup_on_exit():
+    """Container hosts (Render etc.) send SIGTERM before killing an instance.
+    Uvicorn shuts down cleanly on SIGTERM, so this atexit hook runs — flush
+    any not-yet-pushed changes so the restart can't silently roll them back
+    (this is the last gap a plain 25 s debounce leaves open)."""
+    global _bak_pending
+    try:
+        if _bak_pending and _GH_TOKEN and _GH_REPO:
+            _github_push(json.dumps(export_backup(), ensure_ascii=False))
+            _bak_pending = False
+    except Exception:
+        pass
+
+
+atexit.register(_flush_backup_on_exit)
 
 
 def backup_now():
@@ -1726,9 +1748,10 @@ def create_account(b: dict = Body(...)):
     cdsl = (b.get("cdsl") or "").strip()
     if cdsl and not re.fullmatch(r"\d{16}", cdsl):
         raise HTTPException(400, "CDSL BO ID must be 16 digits")
-    aid = run("INSERT INTO accounts(holder,pan,cdsl,broker,bank,upi,auth_mode,notes,active) VALUES(?,?,?,?,?,?,?,?,?)",
+    nxt = (rows("SELECT COALESCE(MAX(sort),0) m FROM accounts")[0]["m"] or 0) + 10
+    aid = run("INSERT INTO accounts(holder,pan,cdsl,broker,bank,upi,auth_mode,notes,active,sort) VALUES(?,?,?,?,?,?,?,?,?,?)",
               (holder, pan, cdsl, b.get("broker", ""), b.get("bank", ""), b.get("upi", ""),
-               b.get("auth_mode", ""), b.get("notes", ""), 1 if b.get("active", True) else 0))
+               b.get("auth_mode", ""), b.get("notes", ""), 1 if b.get("active", True) else 0, nxt))
     return {"ok": True, "id": aid}
 
 
@@ -1839,9 +1862,15 @@ def upsert_app(ipo_id, acc_id, fields: dict, auto_amount=True):
         vals = [merged[k] for k in merged if k != "id"]
         run(f"UPDATE applications SET {sets}, updated_at=datetime('now','localtime') WHERE id=?", (*vals, ex[0]["id"]))
         return ex[0]["id"]
-    cols = ["ipo_id", "account_id"] + [k for k in merged if k not in ("id", "ipo_id", "account_id")]
+    cols = ["ipo_id", "account_id"] + [k for k in merged if k not in ("id", "ipo_id", "account_id", "updated_at")]
     vals = [ipo_id, acc_id] + [merged[k] for k in cols[2:]]
-    return run(f"INSERT INTO applications({','.join(cols)}) VALUES({','.join('?'*len(cols))})", vals)
+    # atomic upsert: a second writer racing the same (ipo, account) pair lands
+    # as an UPDATE instead of a UNIQUE-constraint 500 on the user's screen
+    sets = ", ".join(f"{k}=excluded.{k}" for k in cols[2:])
+    return run(f"""INSERT INTO applications({','.join(cols)})
+                   VALUES({','.join('?' * len(cols))})
+                   ON CONFLICT(ipo_id, account_id) DO UPDATE SET {sets},
+                   updated_at=datetime('now','localtime')""", vals)
 
 
 @app.post("/api/applications")
@@ -2025,6 +2054,10 @@ def _charges_month_roll():
     if changed:
         j["items"].sort(key=lambda x: x.get("date") or "")
         _charges_save(j)
+        try:
+            schedule_backup()  # auto-added charges are real data — back them up
+        except Exception:
+            pass
 
 
 @app.get("/api/charges")

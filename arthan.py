@@ -375,6 +375,9 @@ def refresh_market(force=False, gap=None):
     # tab keeps last-known rows (with their true timestamp). If there is no
     # good cache at all, build a fallback board from the in-server IPOJi
     # feeds so the Market tab still works while IPOWatch is down.
+    # Cap by ROWS (never byte-slice the JSON — a mid-row cut makes the cache
+    # unreadable and the Market tab blanks out even on a healthy refresh).
+    MAX_BOARD_ROWS = 400
     for kv_key, board in ((GMP_BOARD_KV, gmp_board), (SUB_BOARD_KV, sub_board)):
         try:
             rows_sorted = sorted(board.values(),
@@ -387,7 +390,7 @@ def refresh_market(force=False, gap=None):
                 if not legacy:
                     continue
                 rows_sorted = legacy
-            s.kv_set(kv_key, json.dumps({"at": now, "rows": rows_sorted})[:60000])
+            s.kv_set(kv_key, json.dumps({"at": now, "rows": rows_sorted[:MAX_BOARD_ROWS]}))
         except Exception:  # noqa: BLE001
             pass
 
