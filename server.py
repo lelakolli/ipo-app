@@ -157,8 +157,11 @@ import arthan  # noqa: E402 — market-intelligence engine (self-verifying IPO d
 # ----------------------------------------------------------------------------
 
 BACKUP_TABLES = ("accounts", "ipos", "applications", "push_subs", "kv")
-LOCAL_BACKUP = DATA / "live-backup.json"
-SEED_BACKUP = DATA / "seed-backup.json"
+# mirror paths follow the DB location (identical in production — DB lives in
+# DATA — but a test box pointing IPO_DB elsewhere no longer inherits the
+# production mirror file as its "local backup" restore source)
+LOCAL_BACKUP = DB.parent / "live-backup.json"
+SEED_BACKUP = DB.parent / "seed-backup.json"
 _GH_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 _GH_REPO = os.environ.get("GITHUB_REPO", "").strip()  # "username/repo"
 _GH_PATH = "data/live-backup.json"
@@ -185,7 +188,16 @@ def restore_backup(payload: dict) -> dict:
             rows = tables.get(t) or []
             con.execute(f"DELETE FROM {t}")
             if rows:
-                cols = list(rows[0].keys())
+                # column list = UNION of keys across all rows, in first-seen
+                # order. (Old code trusted only row #1's keys: a backup whose
+                # first row was emitted before later schema growth silently
+                # DROPPED newer columns for every row — sell history could
+                # have landed in the wrong field if column order drifted.)
+                cols = []
+                for r in rows:
+                    for k in r.keys():
+                        if k not in cols:
+                            cols.append(k)
                 q = f"INSERT INTO {t} ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})"
                 con.executemany(q, [[r.get(c) for c in cols] for r in rows])
             counts[t] = len(rows)
@@ -425,6 +437,46 @@ def norm_name(s: str) -> str:
     s = re.sub(r"\b(LIMITED|LTD|IPO|INDIA|IND)\b\.?", "", s)
     s = re.sub(r"[^A-Z0-9]", "", s)
     return s
+
+
+# --- input coercion: garbage in a numeric/date field used to explode as a
+#     500 (also a stored-self-XSS path, since raw values were echoed back into
+#     HTML inputs). Reject cleanly with 400 instead. --------------------------
+def _f(v, field="number", lo=None, hi=None):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{field} must be a number")
+    if x != x or x in (float("inf"), float("-inf")):
+        raise HTTPException(400, f"{field} must be a finite number")
+    if lo is not None and x < lo:
+        raise HTTPException(400, f"{field} looks too small")
+    if hi is not None and x > hi:
+        raise HTTPException(400, f"{field} looks too large")
+    return x
+
+
+def _i(v, field="number", lo=None, hi=None):
+    x = _f(v, field, lo, hi)
+    if x != int(x):
+        raise HTTPException(400, f"{field} must be a whole number")
+    return int(x)
+
+
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _dt(v, field="date"):
+    v = (str(v) if v is not None else "").strip()
+    if not v:
+        return ""
+    if not _DATE_RE.fullmatch(v):
+        raise HTTPException(400, f"{field} must be YYYY-MM-DD")
+    try:
+        date.fromisoformat(v)
+    except ValueError:
+        raise HTTPException(400, f"{field} is not a real calendar date")
+    return v
 
 
 def today_str():
@@ -1242,9 +1294,9 @@ CONF_FILE = DATA / "config.json"
 if CONF_FILE.exists():
     CONF = json.loads(CONF_FILE.read_text())
 else:
-    CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}  # random 6-digit first-run code
-    print(f"[boot] FIRST-RUN PASSCODE for this install: {CONF['passcode']} - log in once, "
-          "then set a memorable one inside the app (App passcode card).", flush=True)
+    CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}
+    print(f"[boot] FIRST-RUN PASSCODE for this install: {CONF['passcode']} "
+          "(change it in the app after first login)", flush=True)
     try:
         CONF_FILE.write_text(json.dumps(CONF))
     except Exception:
@@ -1311,6 +1363,34 @@ def _authed(req) -> bool:
     return secrets.compare_digest(req.cookies.get("ipo_auth") or "", _auth_token())
 
 
+# --- forged-cookie brake: the auth token is derivable from the 6-digit
+#     passcode in principle, so guessing cookies must be throttled too, not
+#     just /api/unlock. Only requests that PRESENT a wrong cookie count (normal
+#     logged-out browsing sends no cookie at all and is never punished).
+_cookie_fails = {}   # ip -> [timestamps]
+_cookie_until = {}   # ip -> locked-until epoch
+_gcookie_fails = []  # global rolling window (rotating-IP attackers)
+
+
+def _cookie_brake(ip: str) -> bool:
+    """Return True when this IP/global context is locked out for cookie guessing."""
+    now = time.time()
+    _gcookie_fails[:] = [t for t in _gcookie_fails if now - t < 600]
+    if len(_gcookie_fails) >= 2000:
+        return True
+    if now < _cookie_until.get(ip, 0):
+        return True
+    fails = [t for t in _cookie_fails.get(ip, []) if now - t < 600]
+    fails.append(now)
+    _cookie_fails[ip] = fails
+    _gcookie_fails.append(now)
+    if len(fails) >= 200:
+        _cookie_until[ip] = now + 600
+        _cookie_fails.pop(ip, None)
+        return True
+    return False
+
+
 @app.middleware("http")
 async def passcode_gate(request, call_next):
     p = request.url.path
@@ -1326,10 +1406,31 @@ async def passcode_gate(request, call_next):
                 except Exception:
                     pass
             return resp
+        if request.cookies.get("ipo_auth") and _cookie_brake(_client_ip(request)):
+            return JSONResponse({"ok": False, "error": "too many tries — wait 10 minutes"},
+                                status_code=429)
         if p.startswith("/api"):
             return JSONResponse({"ok": False, "error": "locked"}, status_code=401)
         return HTMLResponse(UNLOCK_HTML)
     return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    """Baseline web hardening on every response. The app is all inline
+    JS/CSS (single-file UI), so CSP keeps 'unsafe-inline' but still blocks
+    external script loads, exfil to other origins, objects and framing."""
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "connect-src 'self'; font-src 'self' data:; object-src 'none'; "
+        "base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+    return resp
 
 
 # --- unlock rate limiting: 5 wrong tries -> locked for 5 minutes (per IP),
@@ -1342,9 +1443,14 @@ _global_until = 0.0
 
 
 def _client_ip(request):
+    # Render's edge APPENDS the real client IP to X-Forwarded-For, so the LAST
+    # entry is the trustworthy one — the FIRST entry is whatever the caller
+    # claimed (spoofable, which used to make per-IP rate limits meaningless).
     fwd = request.headers.get("x-forwarded-for", "")
     if fwd:
-        return fwd.split(",")[0].strip()
+        parts = [p.strip() for p in fwd.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
     return request.client.host if request.client else "?"
 
 
@@ -1353,14 +1459,19 @@ def unlock(request: Request, b: dict = Body(...)):
     global _global_until
     ip = _client_ip(request)
     now = time.time()
-    if now < _global_until:
-        mins = max(1, int((_global_until - now + 59) // 60))
-        raise HTTPException(429, f"Service temporarily locked — try again in {mins} min.")
-    until = _unlock_until.get(ip, 0)
-    if now < until:
-        mins = max(1, int((until - now + 59) // 60))
-        raise HTTPException(429, f"Too many wrong attempts — locked. Try again in {mins} min.")
-    if not secrets.compare_digest(str(b.get("code", "")).strip(), _passcode()):
+    code_ok = secrets.compare_digest(str(b.get("code", "")).strip(), _passcode())
+    # A CORRECT code always opens the lock — even while brakes are engaged.
+    # Attackers spamming wrong codes must never be able to lock the OWNER out
+    # (denial-of-service via the rate limiter itself); they don't know the
+    # code, so letting correct attempts through gives them nothing.
+    if not code_ok:
+        if now < _global_until:
+            mins = max(1, int((_global_until - now + 59) // 60))
+            raise HTTPException(429, f"Service temporarily locked — try again in {mins} min.")
+        until = _unlock_until.get(ip, 0)
+        if now < until:
+            mins = max(1, int((until - now + 59) // 60))
+            raise HTTPException(429, f"Too many wrong attempts — locked. Try again in {mins} min.")
         _global_fails.append(now)
         _global_fails[:] = [t for t in _global_fails if now - t < 600]
         if len(_global_fails) >= 40:
@@ -1426,24 +1537,56 @@ def _wa_cred():
 
 
 def _wa_challenge():
-    """Start a fresh login/registration ceremony. The state is stored in the
-    exact shape fido2 (v1.1.x) reads back in register/authenticate_complete:
-    a websafe-base64-encoded challenge and a user_verification entry."""
+    """Start a fresh ceremony. Challenges are stored in a SET (not one slot —
+    WebAuthn spec: login challenges MUST NOT be reused), each expiring in
+    5 min, and every challenge is consumed (one-time use) by _wa_take_state,
+    which kills replay of a captured assertion outright."""
     from fido2.utils import websafe_encode
     challenge = secrets.token_bytes(32)
-    state = {"challenge": websafe_encode(challenge), "user_verification": "preferred"}
-    kv_set("wa_state", json.dumps({"state": state, "ts": time.time()}))
+    try:
+        st = json.loads(kv_get("wa_state", "{}") or "{}")
+        if not isinstance(st, dict):
+            st = {}
+    except (TypeError, ValueError):
+        st = {}
+    now = time.time()
+    st = {k: v for k, v in st.items()
+          if isinstance(v, dict) and v.get("exp", 0) > now}
+    st[websafe_encode(challenge)] = {"exp": now + 300, "uv": "preferred"}
+    if len(st) > 20:  # cap: keep the newest entries only
+        st = dict(sorted(st.items(), key=lambda kv: kv[1].get("exp", 0))[-20:])
+    kv_set("wa_state", json.dumps(st))
     return challenge
 
 
-def _wa_state(max_age: int = 300):
+def _wa_extract_challenge(b64_client: str):
+    """Pull the challenge field out of a submitted clientDataJSON."""
     try:
-        st = json.loads(kv_get("wa_state", "null") or "null")
+        cd = json.loads(_b64d(b64_client).decode("utf-8", "replace"))
+        return cd.get("challenge")
+    except Exception:
+        return None
+
+
+def _wa_take_state(challenge_b64: str):
+    """One-time use: returns the fido2-shaped state for this exact challenge
+    (and deletes it), else None. Replay of a previously-completed ceremony is
+    rejected here because its challenge no longer exists."""
+    try:
+        st = json.loads(kv_get("wa_state", "{}") or "{}")
+        if not isinstance(st, dict):
+            return None
     except (TypeError, ValueError):
         return None
-    if not st or time.time() - st.get("ts", 0) > max_age:
+    now = time.time()
+    st = {k: v for k, v in st.items()
+          if isinstance(v, dict) and v.get("exp", 0) > now}
+    ent = st.pop(challenge_b64, None)
+    kv_set("wa_state", json.dumps(st))
+    if not ent:
         return None
-    return st.get("state")
+    return {"challenge": challenge_b64,
+            "user_verification": ent.get("uv", "preferred")}
 
 
 def _wa_err(phase: str, e: Exception):
@@ -1487,7 +1630,7 @@ def wa_register_options(request: Request):
 @app.post("/api/webauthn/register/verify")
 def wa_register_verify(request: Request, b: dict = Body(...)):
     srv = _wa_server(request.url.hostname)
-    state = _wa_state()
+    state = _wa_take_state(_wa_extract_challenge(b.get("clientDataJSON", "")) or "")
     if srv is None or state is None:
         raise HTTPException(400, "registration session expired — tap the button again")
     try:
@@ -1501,8 +1644,8 @@ def wa_register_verify(request: Request, b: dict = Body(...)):
         if cd is None:
             raise ValueError("authenticator sent no credential data")
         kv_set("wa_cred", json.dumps({"cred_id": _b64e(cd.credential_id),
-                                      "key": _b64e(cbor.encode(cd.public_key))}))
-        kv_set("wa_state", "null")
+                                      "key": _b64e(cbor.encode(cd.public_key)),
+                                      "counter": int(getattr(auth_data, "counter", 0) or 0)}))
         kv_set("wa_lasterr", "null")
     except Exception as e:  # noqa: BLE001
         _wa_err("register", e)
@@ -1527,7 +1670,7 @@ def wa_login_options(request: Request):
 def wa_login_verify(request: Request, b: dict = Body(...)):
     srv = _wa_server(request.url.hostname)
     cred = _wa_cred()
-    state = _wa_state(180)
+    state = _wa_take_state(_wa_extract_challenge(b.get("clientDataJSON", "")) or "")
     if srv is None or not cred or state is None:
         raise HTTPException(400, "no active fingerprint challenge — tap again")
     try:
@@ -1537,15 +1680,30 @@ def wa_login_verify(request: Request, b: dict = Body(...)):
         import fido2.cbor as cbor
         key = CoseKey.parse(cbor.decode(_b64d(cred["key"])))
         stored = AttestedCredentialData.create(Aaguid.NONE, _b64d(cred["cred_id"]), key)
+        returned_auth_data = AuthenticatorData(_b64d(b["authenticatorData"]))
         srv.authenticate_complete(state, [stored],
                                   _b64d(cred["cred_id"]),
                                   CollectedClientData(_b64d(b["clientDataJSON"])),
-                                  AuthenticatorData(_b64d(b["authenticatorData"])),
+                                  returned_auth_data,
                                   _b64d(b["signature"]))
+        # signature counter: a strictly-increasing counter is the standard
+        # cloned-authenticator tripwire (both zero == authenticator doesn't
+        # support counters -> skip, per WebAuthn spec). fido2 1.1.x returns the
+        # CREDENTIAL from authenticate_complete, so the counter comes from the
+        # submitted auth_data we already parsed.
+        new_cnt = int(getattr(returned_auth_data, "counter", 0) or 0)
+        old_cnt = int(cred.get("counter") or 0)
+        if (new_cnt or old_cnt) and new_cnt <= old_cnt:  # spec: must strictly increase when supported
+            _wa_err("login", RuntimeError(f"sign counter not increasing {old_cnt} -> {new_cnt} (cloned key?)"))
+            raise HTTPException(401, "fingerprint security check failed (counter regression)")
+        if new_cnt != old_cnt:
+            cred["counter"] = new_cnt
+            kv_set("wa_cred", json.dumps(cred))
+    except HTTPException:
+        raise
     except Exception as e:  # noqa: BLE001
         _wa_err("login", e)
         raise HTTPException(401, f"fingerprint check failed ({e.__class__.__name__})")
-    kv_set("wa_state", "null")
     resp = JSONResponse({"ok": True})
     resp.set_cookie("ipo_auth", _auth_token(), max_age=30 * 86400,
                     httponly=True, samesite="lax",
@@ -1739,7 +1897,7 @@ def move_account(aid: int, b: dict = Body(...)):
 
 @app.post("/api/accounts")
 def create_account(b: dict = Body(...)):
-    holder = (b.get("holder") or "").strip()
+    holder = (b.get("holder") or "").strip()[:60]
     if not holder:
         raise HTTPException(400, "holder name required")
     pan = (b.get("pan") or "").strip().upper()
@@ -1750,8 +1908,10 @@ def create_account(b: dict = Body(...)):
         raise HTTPException(400, "CDSL BO ID must be 16 digits")
     nxt = (rows("SELECT COALESCE(MAX(sort),0) m FROM accounts")[0]["m"] or 0) + 10
     aid = run("INSERT INTO accounts(holder,pan,cdsl,broker,bank,upi,auth_mode,notes,active,sort) VALUES(?,?,?,?,?,?,?,?,?,?)",
-              (holder, pan, cdsl, b.get("broker", ""), b.get("bank", ""), b.get("upi", ""),
-               b.get("auth_mode", ""), b.get("notes", ""), 1 if b.get("active", True) else 0, nxt))
+              (holder, pan, cdsl, str(b.get("broker", ""))[:60], str(b.get("bank", ""))[:60],
+               str(b.get("upi", ""))[:80],
+               str(b.get("auth_mode", ""))[:10], str(b.get("notes", ""))[:300],
+               1 if b.get("active", True) else 0, nxt))
     return {"ok": True, "id": aid}
 
 
@@ -1764,15 +1924,20 @@ def update_account(aid: int, b: dict = Body(...)):
     if cdsl and not re.fullmatch(r"\d{16}", cdsl):
         raise HTTPException(400, "CDSL BO ID must be 16 digits")
     run("""UPDATE accounts SET holder=?,pan=?,cdsl=?,broker=?,bank=?,upi=?,auth_mode=?,notes=?,active=? WHERE id=?""",
-        (b.get("holder", "").strip(), pan, cdsl, b.get("broker", ""), b.get("bank", ""),
-         b.get("upi", ""), b.get("auth_mode", ""), b.get("notes", ""), 1 if b.get("active", True) else 0, aid))
+        (b.get("holder", "").strip()[:60], pan, cdsl, str(b.get("broker", ""))[:60],
+         str(b.get("bank", ""))[:60], str(b.get("upi", ""))[:80],
+         str(b.get("auth_mode", ""))[:10], str(b.get("notes", ""))[:300],
+         1 if b.get("active", True) else 0, aid))
     return {"ok": True}
 
 
 @app.delete("/api/accounts/{aid}")
 def delete_account(aid: int):
+    # FK CASCADE removes this account's application rows too — report how much
+    # history went with it so the UI confirm can say the real cost.
+    n = rows("SELECT COUNT(*) c FROM applications WHERE account_id=?", (aid,))[0]["c"]
     run("DELETE FROM accounts WHERE id=?", (aid,))
-    return {"ok": True}
+    return {"ok": True, "removed_applications": n}
 
 
 # ---- ipos ----
@@ -1784,11 +1949,13 @@ def create_ipo(b: dict = Body(...)):
     iid = run("""INSERT INTO ipos(name,registrar,registrar_ref,open_date,close_date,price_min,price_max,
                  lot_size,allotment_date,listing_date,board,symbol,cmp,gmp,source,notes)
                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'manual',?)""",
-              (name, b.get("registrar", "Other"), b.get("registrar_ref", ""), b.get("open_date", ""),
-               b.get("close_date", ""), float(b.get("price_min") or 0), float(b.get("price_max") or 0),
-               int(b.get("lot_size") or 0), b.get("allotment_date", ""), b.get("listing_date", ""),
-               b.get("board", "Mainboard"), b.get("symbol", ""), float(b.get("cmp") or 0),
-               float(b.get("gmp") or 0), b.get("notes", "")))
+              (name, b.get("registrar", "Other"), b.get("registrar_ref", ""), _dt(b.get("open_date"), "open date"),
+               _dt(b.get("close_date"), "close date"), _f(b.get("price_min") or 0, "price min", 0, 1e6),
+               _f(b.get("price_max") or 0, "price max", 0, 1e6),
+               _i(b.get("lot_size") or 0, "lot size", 0, 1e8), _dt(b.get("allotment_date"), "allotment date"),
+               _dt(b.get("listing_date"), "listing date"),
+               b.get("board", "Mainboard"), b.get("symbol", ""), _f(b.get("cmp") or 0, "CMP", 0, 1e7),
+               _f(b.get("gmp") or 0, "GMP", -1e5, 1e6), b.get("notes", "")))
     return {"ok": True, "id": iid}
 
 
@@ -1804,13 +1971,23 @@ def update_ipo(iid: int, b: dict = Body(...)):
     def g(k):
         return b[k] if k in b and b[k] is not None else cur.get(k)
 
+    def gf(k, field, lo=None, hi=None):   # validate only when the caller sent it
+        return _f(g(k) or 0, field, lo, hi) if k in b else (cur.get(k) or 0)
+
+    def gi(k, field, lo=None, hi=None):
+        return _i(g(k) or 0, field, lo, hi) if k in b else (cur.get(k) or 0)
+
+    def gd(k, field):
+        return _dt(g(k), field) if k in b else (cur.get(k) or "")
+
     run("""UPDATE ipos SET name=?,registrar=?,registrar_ref=?,open_date=?,close_date=?,price_min=?,price_max=?,
            lot_size=?,allotment_date=?,listing_date=?,board=?,symbol=?,cmp=?,gmp=?,notes=? WHERE id=?""",
         (str(g("name") or "").strip(), str(g("registrar") or "Other"), str(g("registrar_ref") or ""),
-         g("open_date") or "", g("close_date") or "", float(g("price_min") or 0),
-         float(g("price_max") or 0), int(g("lot_size") or 0), g("allotment_date") or "",
-         g("listing_date") or "", g("board") or "Mainboard", g("symbol") or "",
-         float(g("cmp") or 0), float(g("gmp") or 0), g("notes") or "", iid))
+         gd("open_date", "open date"), gd("close_date", "close date"), gf("price_min", "price min", 0, 1e6),
+         gf("price_max", "price max", 0, 1e6), gi("lot_size", "lot size", 0, 1e8),
+         gd("allotment_date", "allotment date"),
+         gd("listing_date", "listing date"), g("board") or "Mainboard", g("symbol") or "",
+         gf("cmp", "CMP", 0, 1e7), gf("gmp", "GMP", -1e5, 1e6), g("notes") or "", iid))
     return {"ok": True}
 
 
@@ -1875,10 +2052,40 @@ def upsert_app(ipo_id, acc_id, fields: dict, auto_amount=True):
 
 @app.post("/api/applications")
 def save_application(b: dict = Body(...)):
-    ipo_id = int(b.get("ipo_id")); acc_id = int(b.get("account_id"))
-    fields = {k: b.get(k) for k in ("applied", "app_no", "lots", "category", "amount", "upi",
-                                    "mandate_status", "allotment", "allotted_qty", "refund",
-                                    "sell_qty", "sell_price", "sold_on", "checked_note") if k in b}
+    ipo_id = _i(b.get("ipo_id"), "ipo_id"); acc_id = _i(b.get("account_id"), "account_id")
+    fields = {}
+    if "applied" in b:
+        fields["applied"] = _i(b["applied"], "applied", 0, 1)
+    if "lots" in b:
+        fields["lots"] = _i(b["lots"], "lots", 0, 10000)
+    if "amount" in b:
+        fields["amount"] = _f(b["amount"], "amount", 0, 1e9)
+    if "allotted_qty" in b:
+        fields["allotted_qty"] = _i(b["allotted_qty"], "allotted qty", 0, 1e8)
+    if "sell_qty" in b:
+        fields["sell_qty"] = _i(b["sell_qty"], "sold qty", 0, 1e8)
+    if "sell_price" in b:
+        fields["sell_price"] = _f(b["sell_price"], "sell price", 0, 1e7)
+    if "sold_on" in b:
+        fields["sold_on"] = _dt(b["sold_on"], "sold-on date")
+    for k in ("mandate_status",):
+        if k in b:
+            if b[k] not in ("pending", "approved", "rejected", "expired"):
+                raise HTTPException(400, f"bad mandate status '{b[k]}'")
+            fields[k] = b[k]
+    for k in ("allotment",):
+        if k in b:
+            if b[k] not in ("pending", "allotted", "not_allotted"):
+                raise HTTPException(400, f"bad allotment status '{b[k]}'")
+            fields[k] = b[k]
+    for k in ("refund",):
+        if k in b:
+            if b[k] not in ("na", "pending", "received"):
+                raise HTTPException(400, f"bad refund status '{b[k]}'")
+            fields[k] = b[k]
+    for k in ("app_no", "category", "upi", "checked_note"):
+        if k in b and b[k] is not None:
+            fields[k] = str(b[k])[:120]
     aid = upsert_app(ipo_id, acc_id, fields, auto_amount=("amount" not in b))
     # UPI rotation: the per-application ("used") UPI is stored on this row only.
     # The account's DEFAULT UPI never changes from here — edit it in Accounts.
@@ -1933,9 +2140,10 @@ def sold_all(iid: int, b: dict = Body(default={})):
     with LOCK, get_db() as con:
         cur = con.execute(
             "UPDATE applications SET sell_qty=allotted_qty, sell_price=?, "
-            "sold_on=date('now','localtime'), updated_at=datetime('now','localtime') "
+            "sold_on=?, updated_at=datetime('now','localtime') "
             "WHERE ipo_id=? AND allotment='allotted' AND allotted_qty>COALESCE(sell_qty,0)",
-            (price, iid))
+            (price, today_str(), iid))  # IST calendar day — Render hosts run UTC,
+                                        # so SQL 'localtime' stamped midnight sales a day early
         con.commit()
         n = cur.rowcount
     if n:
@@ -1948,6 +2156,15 @@ def export_pnl_csv():
     """Full book as CSV — one tap, opens in Excel/Sheets on the phone."""
     import csv
     import io
+
+    def _csafe(v):
+        # spreadsheet formula-injection guard: a free-text cell opening with
+        # = + - @ would EXECUTE as a formula when the user opens the CSV in
+        # Excel/Sheets. Prefix with ' so it stays plain text.
+        if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t"):
+            return "'" + v
+        return v
+
     ipos_ = {i["id"]: i for i in rows("SELECT * FROM ipos")}
     accs_ = {a["id"]: a for a in rows("SELECT * FROM accounts")}
     apps_ = rows("SELECT * FROM applications WHERE applied=1")
@@ -1962,13 +2179,14 @@ def export_pnl_csv():
         i = ipos_.get(a["ipo_id"], {})
         ac = accs_.get(a["account_id"], {})
         qty = a.get("allotted_qty") or 0
-        cost = round(a["amount"] / qty, 2) if qty else 0
         sq, sp = a.get("sell_qty") or 0, a.get("sell_price") or 0
+        basis = qty or sq                     # sold shares' cost basis (see summaries)
+        cost = round(a["amount"] / basis, 2) if basis else 0
         booked = round((sp - cost) * sq, 2) if a.get("allotment") == "allotted" and sq else 0
         openq = max(0, qty - sq)
         cmp_ = i.get("cmp") or 0
         unreal = round((cmp_ - cost) * openq, 2) if a.get("allotment") == "allotted" else 0
-        w.writerow([i.get("name", "?"), i.get("listing_date", ""), ac.get("holder", "?"),
+        w.writerow([_csafe(i.get("name", "?")), i.get("listing_date", ""), _csafe(ac.get("holder", "?")),
                     a.get("allotment", ""), a.get("lots", ""), a.get("amount", ""),
                     qty or "", cost or "", a.get("refund", ""), cmp_ or "",
                     sq or "", sp or "", a.get("sold_on", ""),
@@ -1980,7 +2198,7 @@ def export_pnl_csv():
     w.writerow(["CARD & OTHER CHARGES (they eat into profit)"])
     w.writerow(["Month", "Note", "Amount (Rs)"])
     for x in sorted(charges_store()["items"], key=lambda z: z.get("date") or ""):
-        w.writerow([(x.get("date") or "")[:7], x.get("note", ""), x.get("amount", "")])
+        w.writerow([(x.get("date") or "")[:7], _csafe(x.get("note", "")), x.get("amount", "")])
     for title, pool, label in (("PROFITS MONTH TO MONTH (booked minus charges)", months, "Month"),
                                ("PROFITS YEAR TO YEAR — FINANCIAL YEAR (Apr-Mar)", fys, "FY"),
                                ("PROFITS YEAR TO YEAR — CALENDAR YEAR", cys, "Year")):
@@ -2074,6 +2292,8 @@ def add_charge(b: dict = Body(...)):
         raise HTTPException(400, "amount required")
     if not amount or amount <= 0:
         raise HTTPException(400, "amount must be positive")
+    if amount > 5_000_000:
+        raise HTTPException(400, "amount looks wrong — monthly charges shouldn't exceed ₹50,00,000")
     note = str(b.get("note") or "").strip()[:80]
     month = str(b.get("month") or "").strip()
     if not re.fullmatch(r"\d{4}-\d{2}", month):
@@ -2131,9 +2351,13 @@ def _pnl_period_summaries():
         m = (a.get("sold_on") or ipo.get("listing_date") or "")[:7]
         if not m:
             continue
-        qty = a.get("allotted_qty") or 0
-        cost = a["amount"] / qty if qty else 0
-        booked = ((a.get("sell_price") or 0) - cost) * (a.get("sell_qty") or 0)
+        sq = a.get("sell_qty") or 0
+        # cost basis per SOLD share: when a row is partially sold the stored
+        # amount covers all shares, so divide by allotted_qty; if the qty was
+        # never recorded the amount maps to the sold shares directly.
+        basis = (a.get("allotted_qty") or 0) or sq
+        cost = a["amount"] / basis if basis else 0
+        booked = round(((a.get("sell_price") or 0) - cost) * sq, 2)
         months.setdefault(m, [0.0, 0.0])[0] += booked
     for x in charges_store()["items"]:
         m = (x.get("date") or "")[:7]
@@ -2158,7 +2382,7 @@ def _pnl_period_summaries():
 def apply_bulk(iid: int, b: dict = Body(...)):
     accs = rows("SELECT * FROM accounts WHERE active=1")
     ids = b.get("account_ids") or [a["id"] for a in accs]
-    lots = int(b.get("lots") or 1)
+    lots = _i(b.get("lots") or 1, "lots", 1, 10000)
     n = 0
     for a in accs:
         if a["id"] not in ids:

@@ -213,7 +213,7 @@ function toast(msg,bad){const t=document.getElementById('toast');t.textContent=m
 const ipoById=id=>S.ipos.find(x=>x.id===+id);
 const accById=id=>S.accounts.find(x=>x.id===+id);
 const appFor=(ipo,acc)=>S.applications.find(a=>a.ipo_id===+ipo&&a.account_id===+acc);
-const costPerShare=a=>a.allotted_qty>0?a.amount/a.allotted_qty:0;
+const costPerShare=a=>{const b=(a.allotted_qty>0?a.allotted_qty:0)||(a.sell_qty||0);return b>0?a.amount/b:0;};
 const bookedPnl=a=>a.allotment==='allotted'&&a.sell_qty>0?(a.sell_price-costPerShare(a))*a.sell_qty:0;
 const unrealPnl=(a,ipo)=>a.allotment==='allotted'?( (ipo.cmp||0)-costPerShare(a) )*Math.max(0,a.allotted_qty-a.sell_qty):0;
 
@@ -610,16 +610,16 @@ window.ipoModal=(id)=>{
     <div class="field full"><label>IPO name</label><input id="f-name" value="${esc(i.name)}" placeholder="e.g. WeWork India Management Ltd"></div>
     <div class="field"><label>Registrar</label><select id="f-registrar">${['Bigshare','KFin','Link Intime','Other'].map(r=>`<option ${i.registrar===r?'selected':''}>${r}</option>`).join('')}</select></div>
     <div class="field"><label>Board</label><select id="f-board"><option ${i.board==='Mainboard'?'selected':''}>Mainboard</option><option ${i.board==='SME'?'selected':''}>SME</option></select></div>
-    <div class="field"><label>Open date</label><input id="f-open" type="date" value="${i.open_date||''}"></div>
-    <div class="field"><label>Close date</label><input id="f-close" type="date" value="${i.close_date||''}"></div>
-    <div class="field"><label>Price min (₹)</label><input id="f-pmin" type="number" value="${i.price_min||''}"></div>
-    <div class="field"><label>Price max / cut-off (₹)</label><input id="f-pmax" type="number" value="${i.price_max||''}"></div>
-    <div class="field"><label>Lot size (shares)</label><input id="f-lot" type="number" value="${i.lot_size||''}"></div>
+    <div class="field"><label>Open date</label><input id="f-open" type="date" value="${esc(i.open_date||'')}"></div>
+    <div class="field"><label>Close date</label><input id="f-close" type="date" value="${esc(i.close_date||'')}"></div>
+    <div class="field"><label>Price min (₹)</label><input id="f-pmin" type="number" value="${esc(i.price_min||'')}"></div>
+    <div class="field"><label>Price max / cut-off (₹)</label><input id="f-pmax" type="number" value="${esc(i.price_max||'')}"></div>
+    <div class="field"><label>Lot size (shares)</label><input id="f-lot" type="number" value="${esc(i.lot_size||'')}"></div>
     <div class="field"><label>NSE symbol (optional)</label><input id="f-symbol" value="${esc(i.symbol||'')}" placeholder="for reference"></div>
-    <div class="field"><label>Allotment date</label><input id="f-allot" type="date" value="${i.allotment_date||''}"></div>
-    <div class="field"><label>Listing date</label><input id="f-list" type="date" value="${i.listing_date||''}"></div>
-    <div class="field"><label>CMP ₹ (set on listing)</label><input id="f-cmp" type="number" step="0.01" value="${i.cmp||''}"></div>
-    <div class="field"><label>GMP ₹ (optional)</label><input id="f-gmp" type="number" step="0.01" value="${i.gmp||''}"></div>
+    <div class="field"><label>Allotment date</label><input id="f-allot" type="date" value="${esc(i.allotment_date||'')}"></div>
+    <div class="field"><label>Listing date</label><input id="f-list" type="date" value="${esc(i.listing_date||'')}"></div>
+    <div class="field"><label>CMP ₹ (set on listing)</label><input id="f-cmp" type="number" step="0.01" value="${esc(i.cmp||'')}"></div>
+    <div class="field"><label>GMP ₹ (optional)</label><input id="f-gmp" type="number" step="0.01" value="${esc(i.gmp||'')}"></div>
     <div class="field full"><label>Registrar ref (optional — Bigshare company id / LI clientId for auto allotment)</label><input id="f-ref" value="${esc(i.registrar_ref||'')}"></div>
     <div class="field full"><label>Notes</label><input id="f-notes" value="${esc(i.notes||'')}"></div>
   </div>
@@ -662,7 +662,11 @@ function renderAccounts(){
 window.moveAcc=async(id,dir)=>{
   await api(`/api/accounts/${id}/move`,'POST',{dir});
   refresh();};
-window.delAcc=async(id,name)=>{if(!confirm(`Delete account "${name}" and its application rows?`))return;
+window.delAcc=async(id,name)=>{
+  const n=S.applications.filter(x=>x.account_id===id).length;
+  const msg=n?`Delete account "${name}"?\n\n⚠ This also permanently deletes ${n} application row${n===1?'':'s'} (sold history, P&L) linked to it.`
+            :`Delete account "${name}"?`;
+  if(!confirm(msg))return;
   await api('/api/accounts/'+id,'DELETE');toast('Deleted');refresh();};
 window.accModal=(id)=>{
   const a=id?accById(id):{holder:'',pan:'',cdsl:'',broker:'',bank:'',upi:'',auth_mode:'',notes:'',active:1};
@@ -712,13 +716,13 @@ function renderApps(){
       ${a.upi?`<button type="button" class="btn sm ghost" style="padding:1px 7px;font-size:11px;margin-left:3px" title="Copy default into the Used UPI field" onclick="copyDefUpi(this)" ${dis}>⇐ use</button>`:''}</td>
     <td><input class="mini wide f-upi ${(ap.upi&&a.upi&&ap.upi!==a.upi)?'upi-diff':''}" data-def="${esc(a.upi||'')}" value="${esc(ap.upi||a.upi||'')}" title="UPI ID actually used for this application — amber highlight = different from default" ${dis}></td>
     <td class="f-pnl ${preListed?(estTot!=null?'pos':'mut'):pnlCls(profit)}" style="white-space:nowrap">${ap.allotment==='allotted'?(preListed?(estTot!=null?`est ${pnlTxt(estTot)}<br><span class="mut" style="font-size:11px">₹${num(cost+(ipo.gmp||0))}/sh expected (GMP)</span>`:'<span class="mut">— listing soon</span>'):pnlTxt(profit)+(cost?`<br><span class="mut" style="font-size:11px">cost ₹${num(cost)}</span>`:'')):'<span class="mut">—</span>'}</td>
-    <td><input type="number" class="mini num f-aqty" style="width:70px" min="0" value="${ap.allotted_qty||''}" ${dis}></td>
-    <td><input type="number" class="mini num f-lots" style="width:60px" min="0" value="${ap.lots||1}" ${dis}></td>
-    <td><input type="number" class="mini num f-amount" step="0.01" value="${ap.amount||''}" ${dis}></td>
+    <td><input type="number" class="mini num f-aqty" style="width:70px" min="0" value="${esc(ap.allotted_qty||'')}" ${dis}></td>
+    <td><input type="number" class="mini num f-lots" style="width:60px" min="0" value="${esc(ap.lots||1)}" ${dis}></td>
+    <td><input type="number" class="mini num f-amount" step="0.01" value="${esc(ap.amount||'')}" ${dis}></td>
     <td><select class="mini f-mandate" ${dis}>${['pending','approved','rejected','expired'].map(s=>`<option ${ap.mandate_status===s?'selected':''}>${s}</option>`).join('')}</select></td>
     <td><select class="mini f-refund" ${dis}>${[['na','n/a'],['pending','pending'],['received','unblocked ✓']].map(([v,l])=>`<option value="${v}" ${ap.refund===v?'selected':''}>${l}</option>`).join('')}</select></td>
-    <td><input type="number" class="mini num f-sqty" style="width:65px" min="0" value="${ap.sell_qty||''}" ${dis}></td>
-    <td><input type="number" class="mini num f-sprice" style="width:80px" step="0.01" value="${ap.sell_price||''}" ${dis}></td>
+    <td><input type="number" class="mini num f-sqty" style="width:65px" min="0" value="${esc(ap.sell_qty||'')}" ${dis}></td>
+    <td><input type="number" class="mini num f-sprice" style="width:80px" step="0.01" value="${esc(ap.sell_price||'')}" ${dis}></td>
     </tr>`;}).join('');
   const applied=S.applications.filter(x=>x.ipo_id===ipo.id&&x.applied);
   const pendRef=applied.filter(a=>a.refund==='pending');
@@ -905,7 +909,7 @@ window.runAllotmentCheck=async()=>{
       return `<div><b>${esc(x.holder)}</b> — <span style="color:${col};font-weight:650">${lbl}</span>
         ${x.note?`<br><span class="mut">${esc(x.note)}</span>`:''}
         ${x.matched_company?`<br><span class="mut">matched: ${esc(x.matched_company)}</span>`:''}
-        ${x.link?`<br><a href="${x.link}" target="_blank">Open registrar →</a>`:''}</div>`;}).join('');
+        ${x.link?`<br><a href="${esc(x.link)}" target="_blank" rel="noopener">Open registrar →</a>`:''}</div>`;}).join('');
     toast('Allotment check complete');
   }catch(e){box.innerHTML='<div class="neg">Check failed: '+esc(e.message)+'</div>';}
   btn.disabled=false;btn.textContent='🔍 Auto-check allotment ('+ipoById(selIpo).registrar+')';
