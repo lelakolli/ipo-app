@@ -1086,7 +1086,16 @@ window.toggleAlerts=()=>{
     api('/api/alerts').then(r=>{r.alerts.forEach(a=>seenAlerts.add(a.kind+'|'+a.title+'|'+a.detail));
       localStorage.setItem('seenAlerts',JSON.stringify([...seenAlerts].slice(-500)));
       document.getElementById('bell-count').style.display='none';});}};
-setInterval(loadAlerts,60000);setTimeout(loadAlerts,1500);
+// polls only run while the app is OPEN & VISIBLE — a closed/minimized app sends
+// nothing, so the server's 5-minute session expires and the lock engages.
+setInterval(()=>{if(document.visibilityState==='visible')loadAlerts();},60000);setTimeout(loadAlerts,1500);
+// heartbeat: every 3 min of real activity holds the auto-lock off; also ping on
+// return so an expired session flips to the lock screen immediately (via the
+// 401 handler in api()) instead of failing on your next tap.
+const heartbeat=()=>{if(document.visibilityState!=='visible')return;
+  fetch('/api/ping',{method:'POST'}).then(r=>{if(r.status===401)location.href='/';}).catch(()=>{});};
+setInterval(heartbeat,3*60*1000);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){heartbeat();loadAlerts();}});
 
 // ---------- modal ----------
 function openModal(html){document.getElementById('modal').innerHTML=html;

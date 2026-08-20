@@ -1322,6 +1322,46 @@ def _passcode() -> str:
 def _auth_token() -> str:
     return hashlib.sha256((_passcode() + "-ipo-center").encode()).hexdigest()[:48]
 
+
+# --- sliding sessions with server-side auto-lock ---------------------------
+# The auth cookie is a RANDOM token (never derived from the passcode, so there
+# is nothing to brute-force), remembered in memory with a last-activity stamp.
+# If no request touches the session for SESS_TTL seconds, it is dead — that is
+# the auto-lock: the app stops sending requests the moment it is closed (its
+# heartbeat only runs while visible), so the lock engages ~5 min after closing.
+# In-memory on purpose: a host restart simply asks for one unlock (1 tap with
+# fingerprint) instead of trusting year-old cookies.
+SESS_TTL = 300          # 5 minutes of no activity -> locked
+SESS_MAX = 12           # phone + desktop + a few spares; oldest evicted
+_sessions = {}          # token -> last activity epoch
+
+
+def _sess_new() -> str:
+    tok = secrets.token_urlsafe(32)
+    now = time.time()
+    if len(_sessions) >= SESS_MAX:
+        for t, _ in sorted(_sessions.items(), key=lambda kv: kv[1])[:SESS_MAX // 2]:
+            _sessions.pop(t, None)
+    _sessions[tok] = now
+    return tok
+
+
+def _sess_ok(tok: str) -> bool:
+    if not tok:
+        return False
+    now = time.time()
+    ts = _sessions.get(tok)
+    if ts is None or now - ts > SESS_TTL:
+        _sessions.pop(tok, None)
+        return False
+    _sessions[tok] = now   # slide: any activity resets the 5-minute clock
+    return True
+
+
+def _sess_kill(tok: str):
+    _sessions.pop(tok or "", None)
+
+
 UNLOCK_HTML = r"""<!DOCTYPE html><html><head><script>try{if(localStorage.getItem("ic-theme")==="light")document.documentElement.dataset.theme="light";}catch(_){}</script><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>IPO Center — Unlock</title>
 <style>
@@ -1333,7 +1373,7 @@ input{background:var(--input);border:1px solid var(--line);color:var(--txt);bord
 button{background:var(--acc);border:none;color:#fff;border-radius:10px;padding:12px;width:100%;font-size:15px;font-weight:600;cursor:pointer}
 .err{color:var(--red);font-size:12.5px;min-height:18px;margin-top:10px}</style></head><body>
 <div class="box"><div style="font-size:38px">🔒</div><h2 style="font-size:17px;margin:10px 0 4px">IPO Command Center</h2>
-<p style="color:var(--mut);font-size:13px">Enter your 6-digit passcode</p>
+<p style="color:var(--mut);font-size:13px">Enter your 6-digit passcode <span style="opacity:.75">(locks automatically 5 min after the app is closed)</span></p>
 <input id="c" inputmode="numeric" maxlength="6" autocomplete="off" autofocus>
 <button onclick="go()">Unlock</button>
 <button id="fp" style="display:none;background:transparent;border:1px solid var(--acc);color:var(--acc);margin-top:10px" onclick="fp()">👆 Unlock with fingerprint</button><div class="err" id="e"></div>
@@ -1360,7 +1400,7 @@ PUBLIC_PATHS = {"/manifest.json", "/sw.js", "/favicon.ico", "/api/unlock", "/hea
 
 
 def _authed(req) -> bool:
-    return secrets.compare_digest(req.cookies.get("ipo_auth") or "", _auth_token())
+    return _sess_ok(req.cookies.get("ipo_auth") or "")
 
 
 # --- forged-cookie brake: the auth token is derivable from the 6-digit
@@ -1400,7 +1440,7 @@ async def passcode_gate(request, call_next):
         if _authed(request):
             resp = await call_next(request)
             if (request.method in ("POST", "PUT", "DELETE") and resp.status_code < 400
-                    and p not in ("/api/unlock", "/api/backup")):
+                    and p not in ("/api/unlock", "/api/backup", "/api/ping")):
                 try:
                     schedule_backup()
                 except Exception:
@@ -1490,19 +1530,28 @@ def unlock(request: Request, b: dict = Body(...)):
     _unlock_fails.pop(ip, None)
     _unlock_until.pop(ip, None)
     resp = JSONResponse({"ok": True})
-    resp.set_cookie("ipo_auth", _auth_token(), max_age=30 * 86400,
+    resp.set_cookie("ipo_auth", _sess_new(), max_age=30 * 86400,
                     httponly=True, samesite="lax",
                     secure=(request.url.scheme == "https"))
     return resp
 
 
 @app.post("/api/logout")
-def api_logout():
-    """Clear the auth cookie on this device — the lock screen appears on the
-       next page load. Other signed-in devices are unaffected."""
+def api_logout(request: Request):
+    """Kill this device's session server-side (a stolen cookie dies with it),
+       then clear the cookie. Other signed-in devices are unaffected."""
+    _sess_kill(request.cookies.get("ipo_auth") or "")
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("ipo_auth", httponly=True, samesite="lax")
     return resp
+
+
+@app.post("/api/ping")
+def api_ping():
+    """Heartbeat from the open app (keeps the 5-minute auto-lock from sliding
+       while you're actively using it). Returns 401 once the session expired,
+       which is what makes the lock screen appear."""
+    return {"ok": True}
 
 
 # ----------------------------------------------------------------------------
@@ -1705,7 +1754,7 @@ def wa_login_verify(request: Request, b: dict = Body(...)):
         _wa_err("login", e)
         raise HTTPException(401, f"fingerprint check failed ({e.__class__.__name__})")
     resp = JSONResponse({"ok": True})
-    resp.set_cookie("ipo_auth", _auth_token(), max_age=30 * 86400,
+    resp.set_cookie("ipo_auth", _sess_new(), max_age=30 * 86400,
                     httponly=True, samesite="lax",
                     secure=(request.url.scheme == "https"))
     return resp
@@ -1728,7 +1777,7 @@ def change_passcode(request: Request, b: dict = Body(...)):
     # keep THIS device logged in: re-issue its cookie against the new code
     # (every other signed-in device is logged out and will need the new code)
     resp = JSONResponse({"ok": True})
-    resp.set_cookie("ipo_auth", _auth_token(), max_age=30 * 86400,
+    resp.set_cookie("ipo_auth", _sess_new(), max_age=30 * 86400,
                     httponly=True, samesite="lax",
                     secure=(request.url.scheme == "https"))
     return resp
