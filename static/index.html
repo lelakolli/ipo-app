@@ -220,6 +220,9 @@ const unrealPnl=(a,ipo)=>a.allotment==='allotted'?( (ipo.cmp||0)-costPerShare(a)
 async function refresh(){S=await api('/api/state');
   document.getElementById('hdr-counts').textContent=`${S.accounts.filter(a=>a.active).length} accounts • ${S.ipos.filter(i=>i.status==='open').length} IPOs open`;
   render();}
+// After a one-tap write: if the reload itself fails (network blip), SAY SO —
+// otherwise a stale screen looks exactly like "the save didn't happen".
+const refreshHard=()=>refresh().catch(()=>toast('Saved on server ✓ — but screen reload failed. Close & reopen to see the latest.',1));
 
 // ---------- tabs ----------
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{curTab=b.dataset.tab;
@@ -824,7 +827,7 @@ window.applyAll=async()=>{
   const amt=ipo.price_max&&ipo.lot_size?ipo.price_max*ipo.lot_size*lots:0;
   if(!confirm(`Apply 1 lot in "${ipo.name}" for all ${active.length} active accounts${amt?` (~${rs(amt)} each, ${kr(amt*active.length)} total)`:''}?\nUPI auto-fills from each account's default.`))return;
   const r=await api(`/api/ipos/${selIpo}/apply`,'POST',{lots,category:'Retail'});
-  toast(`Applied for ${r.applied} accounts ✔`);refresh();};
+  toast(`Applied for ${r.applied} accounts ✔`);refreshHard();};
 function _bufToB64(b){return btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 window.fpRegister=async()=>{
   if(!('credentials' in navigator)||!window.PublicKeyCredential)return toast('This browser does not support biometrics',1);
@@ -865,7 +868,7 @@ window.markAllMandates=async()=>{
   const ipo=ipoById(selIpo);
   if(!confirm(`Mark UPI mandate APPROVED for every account in "${ipo.name}"?`))return;
   const r=await api(`/api/ipos/${selIpo}/mandates`,'POST',{status:'approved'});
-  toast(`✓ ${r.updated} mandates marked approved`);refresh();};
+  toast(`✓ ${r.updated} mandates marked approved`);refreshHard();};
 window.unblockAllFunds=async()=>{
   const ipo=ipoById(selIpo);if(!ipo)return;
   const pend=S.applications.filter(x=>x.ipo_id===ipo.id&&x.applied&&x.refund==='pending');
@@ -874,8 +877,9 @@ window.unblockAllFunds=async()=>{
   try{
     const amt=pend.reduce((s,a)=>s+(a.amount||0),0);
     const r=await api(`/api/ipos/${ipo.id}/funds_unblocked`,'POST',{});
-    toast(`🔓 ${r.unblocked} fund${r.unblocked===1?'':'s'} unblocked ✓ — ${kr(amt)} released`);
-  }finally{refresh();}};
+    if(!r.unblocked)toast('⚠ Server found nothing to unblock — the screen was stale; reloaded below.',1);
+    else toast(`🔓 ${r.unblocked} fund${r.unblocked===1?'':'s'} unblocked ✓ — ${kr(amt)} released`);
+  }finally{refreshHard();}};
 window.checkOne=async(accId)=>{
   const ap=appFor(selIpo,accId);
   const body={ipo_id:selIpo,account_id:accId,category:'Retail'};
@@ -890,13 +894,13 @@ window.soldAllCmp=async()=>{
   if(!n)return toast('Nothing left to sell — every allotted row is already fully sold ✓');
   if(!confirm(`Book ALL ${n} allotted row${n===1?'':'s'} of "${ipo.name}" as SOLD at CMP ₹${num(ipo.cmp)} each?`))return;
   const r=await api(`/api/ipos/${ipo.id}/sold_all`,'POST',{});
-  toast(`💰 ${r.sold_rows} rows sold @ ₹${num(r.price)} — P&L locked ✓`);refresh();};
+  toast(`💰 ${r.sold_rows} rows sold @ ₹${num(r.price)} — P&L locked ✓`);refreshHard();};
 window.soldAllPrice=async()=>{
   const ipo=ipoById(selIpo);if(!ipo)return;
   const p=prompt(`Sell price per share for ALL allotted rows of "${ipo.name}"?`,ipo.cmp||'');
   if(!p||isNaN(+p)||+p<=0)return;
   const r=await api(`/api/ipos/${ipo.id}/sold_all`,'POST',{price:+p});
-  toast(`💰 ${r.sold_rows} rows sold @ ₹${num(r.price)} — P&L locked ✓`);refresh();};
+  toast(`💰 ${r.sold_rows} rows sold @ ₹${num(r.price)} — P&L locked ✓`);refreshHard();};
 window.runAllotmentCheck=async()=>{
   const btn=document.getElementById('chkbtn');btn.disabled=true;btn.textContent='Checking…';
   const box=document.getElementById('checkres');box.style.display='block';
@@ -913,7 +917,7 @@ window.runAllotmentCheck=async()=>{
     toast('Allotment check complete');
   }catch(e){box.innerHTML='<div class="neg">Check failed: '+esc(e.message)+'</div>';}
   btn.disabled=false;btn.textContent='🔍 Auto-check allotment ('+ipoById(selIpo).registrar+')';
-  refresh();};
+  refreshHard();};
 
 // ---------- P&L ----------
 function renderPnl(){

@@ -1348,8 +1348,7 @@ if CONF_FILE.exists():
     CONF = json.loads(CONF_FILE.read_text())
 else:
     CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}
-    print(f"[boot] FIRST-RUN PASSCODE for this install: {CONF['passcode']} "
-          "(change it in the app after first login)", flush=True)
+    print("[boot] FIRST-RUN PASSCODE:", CONF["passcode"], "— change it in Settings after first login.", flush=True)
     try:
         CONF_FILE.write_text(json.dumps(CONF))
     except Exception:
@@ -2203,6 +2202,8 @@ def set_all_mandates(iid: int, b: dict = Body(...)):
         cur = con.execute("UPDATE applications SET mandate_status=?, updated_at=datetime('now','localtime') WHERE ipo_id=? AND applied=1", (status, iid))
         con.commit()
         n = cur.rowcount
+    if n:
+        backup_now()  # instant push — one-tap bulk writes must survive a free-host hard kill
     return {"ok": True, "updated": n}
 
 
@@ -2219,7 +2220,10 @@ def unblock_all_funds(iid: int):
         con.commit()
         n = cur.rowcount
     if n:
-        schedule_backup()
+        # Instant push, not the 25 s debounce — a hard-kill inside that window
+        # once rolled a successful "All funds unblocked" tap back (toast said
+        # done, table/dashboard reverted to the older backup on restart).
+        backup_now()
     return {"ok": True, "unblocked": n}
 
 
@@ -2249,7 +2253,7 @@ def sold_all(iid: int, b: dict = Body(default={})):
         con.commit()
         n = cur.rowcount
     if n:
-        schedule_backup()
+        backup_now()  # instant push — same hard-kill rollback class as funds_unblocked
     return {"ok": True, "sold_rows": n, "price": price}
 
 
@@ -2493,6 +2497,8 @@ def apply_bulk(iid: int, b: dict = Body(...)):
                                   "category": b.get("category", "Retail"),
                                   "upi": a.get("upi", "")})
         n += 1
+    if n:
+        backup_now()  # instant push — bulk apply marks are one-tap, high-value writes
     return {"ok": True, "applied": n}
 
 
@@ -2554,6 +2560,8 @@ def check_allotment(iid: int):
     if not apps:
         raise HTTPException(400, "No applications recorded for this IPO yet")
     results = run_allotment_checks(ipo)
+    if results:
+        backup_now()  # verdicts drive push alerts — never let a restart re-notify or roll them back
     try:
         notify_alotment_result(ipo, results)
     except Exception as e:
