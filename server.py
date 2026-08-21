@@ -1072,6 +1072,47 @@ def refresh_subscriptions():
     return {"ok": True, "matched": matched, "chittorgarh": len(cg), "ipoji": len(iji), "errors": errors}
 
 
+def _ipoji_listing_date(name: str) -> str:
+    """Fetch the authoritative listing date from IPOJi's per-IPO page.
+    Every page embeds JSON-LD PropertyValues for the whole IPO calendar
+    (machine-readable, no fragile table scraping)."""
+    slug = re.sub(r"\b(limited|ltd|private|pvt)\b", "", name.lower())
+    slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
+    for cand in (slug + "-ipo", slug):
+        try:
+            t = requests.get(f"https://www.ipoji.com/ipo/{cand}", headers=UA, timeout=15).text
+        except Exception:
+            continue
+        m = re.search(r'"IPO listing date"\s*,\s*"value"\s*:\s*"(\d{4}-\d{2}-\d{2})"', t)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def recover_stale_listings(limit=6):
+    """Auto-heal the RESULT AWAITED stragglers: an IPO whose tentative listing
+    date wasn't published when the scrapers first saw it drops off the source
+    dashboards once it closes, so nothing ever back-fills listing_date and the
+    chip sticks at RESULT AWAITED forever. Sweep those rows via IPOJi's
+    per-IPO calendar, then let the CMP cycle pick up live prices."""
+    t = today_str()
+    stale = rows("""SELECT id, name FROM ipos
+                    WHERE COALESCE(listing_date,'')='' AND COALESCE(close_date,'')<>''
+                      AND close_date < ? ORDER BY close_date ASC LIMIT ?""", (t, limit))
+    fixed = []
+    for i in stale:
+        ld = _ipoji_listing_date(i["name"])
+        if not ld:
+            continue
+        # never clobber a date the user set meanwhile (or another writer raced in)
+        run("UPDATE ipos SET listing_date=? WHERE id=? AND COALESCE(listing_date,'')=''",
+            (ld, i["id"]))
+        fixed.append({"name": i["name"], "listing_date": ld})
+    if fixed:
+        schedule_backup()
+    return fixed
+
+
 def refresh_gmp():
     """Update gmp for tracked IPOs. Returns {'matched':n,'total':n}."""
     try:
@@ -1112,13 +1153,21 @@ def yahoo_price(symbol):
 
 def resolve_symbol(name):
     """Best-effort: find NSE symbol from company name via Yahoo search."""
-    q = re.sub(r"\b(limited|ltd|india)\b", "", name, flags=re.I).strip()
-    try:
+
+    def _search(q):
         r = requests.get("https://query1.finance.yahoo.com/v1/finance/search",
                          params={"q": q, "quotesCount": 6, "newsCount": 0, "enableFuzzyQuery": True},
                          headers=UA, timeout=10)
         r.raise_for_status()
-        cands = [x for x in r.json().get("quotes", []) if str(x.get("symbol", "")).endswith(".NS")]
+        return [x for x in r.json().get("quotes", []) if str(x.get("symbol", "")).endswith(".NS")]
+
+    q = re.sub(r"\b(limited|ltd|india)\b", "", name, flags=re.I).strip()
+    try:
+        cands = _search(q)
+        # the Indian ticker often only surfaces for the FULL company name —
+        # e.g. "LEAP" returns US/HK noise, "LEAP India" returns LEAPIND.NS
+        if not cands and q.lower() != name.strip().lower():
+            cands = _search(name.strip()) or cands
         tgt = norm_name(name)
         for c in cands:
             cn = norm_name(c.get("shortname") or c.get("longname") or c.get("symbol", ""))
@@ -1275,6 +1324,10 @@ def sync_live_ipos():
                  s.get("price_min", 0), s.get("price_max", 0), s.get("lot_size", 0),
                  s.get("allotment_date", ""), s.get("listing_date", ""), "Mainboard", s.get("gmp", 0)))
             summary["added"] += 1
+    try:
+        summary["listings_recovered"] = recover_stale_listings()
+    except Exception as e:
+        summary["listings_recovered"] = f"skipped ({e})"
     return summary
 
 
