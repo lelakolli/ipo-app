@@ -1435,19 +1435,41 @@ def _sess_kill(tok: str):
 UNLOCK_HTML = r"""<!DOCTYPE html><html><head><script>try{if(localStorage.getItem("ic-theme")==="light")document.documentElement.dataset.theme="light";}catch(_){}</script><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>IPO Center — Unlock</title>
 <style>
-:root{--bg:#0b1220;--card:#121b2e;--line:#243150;--txt:#e6ecf5;--mut:#8b9bb5;--acc:#4f8cff;--input:#0e1730;--red:#ef4444}
-:root[data-theme=light]{--bg:#f1f4f9;--card:#ffffff;--line:#d8dee9;--txt:#16233a;--mut:#5c6c84;--acc:#2563eb;--input:#f4f6fa;--red:#dc2626}
-body{background:var(--bg);color:var(--txt);font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-.box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:32px 28px;text-align:center;max-width:340px;width:90%}
-input{background:var(--input);border:1px solid var(--line);color:var(--txt);border-radius:10px;padding:12px;font-size:18px;width:100%;text-align:center;letter-spacing:6px;margin:14px 0;box-sizing:border-box}
-button{background:var(--acc);border:none;color:#fff;border-radius:10px;padding:12px;width:100%;font-size:15px;font-weight:600;cursor:pointer}
-.err{color:var(--red);font-size:12.5px;min-height:18px;margin-top:10px}</style></head><body>
-<div class="box"><div style="font-size:38px">🔒</div><h2 style="font-size:17px;margin:10px 0 4px">IPO Command Center</h2>
-<p style="color:var(--mut);font-size:13px">Enter your 6-digit passcode <span style="opacity:.75">(locks automatically 5 min after the app is closed)</span></p>
+:root{color-scheme:dark;--bg:#070d14;--card:#0f1824;--line:#1e2d3e;--txt:#e9eff6;--mut:#8fa3b8;--acc:#14b8a6;--acc2:#2dd4bf;--gold:#e3b23c;--input:#0b1420;--red:#f87171;
+--glow:radial-gradient(1200px 620px at 72% -12%,rgba(20,184,166,.09),transparent 62%);--ring:0 0 0 3px rgba(20,184,166,.28);--ease:cubic-bezier(.2,.7,.3,1)}
+:root[data-theme=light]{color-scheme:light;--bg:#f2f6f7;--card:#ffffff;--line:#dae3e8;--txt:#13212d;--mut:#5b7181;--acc:#0d9488;--acc2:#14b8a6;--gold:#a97e14;--input:#f3f7f8;--red:#dc2626;
+--glow:radial-gradient(1200px 620px at 72% -12%,rgba(13,148,136,.06),transparent 62%);--ring:0 0 0 3px rgba(13,148,136,.22)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);background-image:var(--glow);background-attachment:fixed;color:var(--txt);
+font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;display:flex;align-items:center;justify-content:center;
+min-height:100vh;-webkit-font-smoothing:antialiased;padding:20px}
+.box{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:36px 30px;text-align:center;max-width:350px;width:100%;
+box-shadow:inset 0 1px 0 rgba(255,255,255,.03),0 18px 48px rgba(0,0,0,.45);animation:pop .3s var(--ease)}
+@keyframes pop{from{opacity:0;transform:scale(.96) translateY(8px)}to{opacity:1;transform:none}}
+.mark{width:62px;height:62px;margin:0 auto 4px;border-radius:17px;display:flex;align-items:center;justify-content:center;font-size:30px;
+background:linear-gradient(140deg,rgba(20,184,166,.28),rgba(227,178,60,.14));border:1px solid rgba(20,184,166,.45);
+box-shadow:0 0 0 6px rgba(20,184,166,.07)}
+h2{font-size:18px;font-weight:800;letter-spacing:-.2px;margin:12px 0 4px}
+h2 span{background:linear-gradient(100deg,var(--gold),#f2cd6b);-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{color:var(--mut);font-size:12.5px;line-height:1.55}
+input{background:var(--input);border:1px solid var(--line);color:var(--txt);border-radius:13px;padding:14px;font-size:21px;width:100%;
+text-align:center;letter-spacing:9px;margin:16px 0 12px;transition:border-color .16s var(--ease),box-shadow .16s var(--ease);
+font-variant-numeric:tabular-nums}
+input:focus{outline:none;border-color:var(--acc);box-shadow:var(--ring)}
+button{background:linear-gradient(135deg,var(--acc),var(--acc2));border:none;color:#fff;border-radius:12px;padding:13px;width:100%;
+font-size:15px;font-weight:700;letter-spacing:.2px;cursor:pointer;box-shadow:0 2px 10px rgba(20,184,166,.3);
+transition:filter .16s var(--ease),transform .12s var(--ease)}
+button:hover{filter:brightness(1.07)}
+button:active{transform:scale(.97)}
+button:focus-visible{outline:none;box-shadow:var(--ring)}
+.err{color:var(--red);font-size:12.5px;min-height:18px;margin-top:10px;font-weight:600}
+.hint{color:var(--mut);font-size:11px;margin-top:14px;line-height:1.55}</style></head><body>
+<div class="box"><div class="mark">📈</div><h2>IPO <span>Command Center</span></h2>
+<p class="sub">Enter your 6-digit passcode<br><span style="opacity:.8">Auto-locks 5 minutes after you close the app</span></p>
 <input id="c" inputmode="numeric" maxlength="6" autocomplete="off" autofocus>
 <button onclick="go()">Unlock</button>
-<button id="fp" style="display:none;background:transparent;border:1px solid var(--acc);color:var(--acc);margin-top:10px" onclick="fp()">👆 Unlock with fingerprint</button><div class="err" id="e"></div>
-<p style="color:var(--mut);font-size:11px;margin-top:14px">Forgot it? If you set a PASSCODE in your hosting dashboard, change it there. Otherwise check the hosting logs for the line "FIRST-RUN PASSCODE".</p></div>
+<button id="fp" style="display:none;background:transparent;border:1px solid var(--acc);color:var(--acc2);margin-top:10px;box-shadow:none" onclick="fp()">👆 Unlock with fingerprint</button><div class="err" id="e"></div>
+<p class="hint">Forgot it? If you set a PASSCODE in your hosting dashboard, change it there. Otherwise check the hosting logs for the line "FIRST-RUN PASSCODE".</p></div>
 <script>
 const go=async()=>{const r=await fetch('/api/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:document.getElementById('c').value})});
 if(r.ok)location.href='/';else{let m='Wrong passcode — try again';try{const j=await r.json();if(j.detail)m=j.detail;}catch(_){}document.getElementById('e').textContent=m;}};
