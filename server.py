@@ -342,6 +342,10 @@ def boot_restore():
     for label, payload in candidates:
         try:
             counts = restore_backup(payload)
+            # seed the visible save pulse with the restored backup's own clock —
+            # otherwise the header shows "💾 —" until this boot's first write
+            global _bak_last_ok
+            _bak_last_ok = (payload.get("exported_at") or "")
             print(f"[backup] restored from {label} (export {(payload.get('exported_at') or '?')[:19]}): {counts}",
                   flush=True)
             return
