@@ -517,7 +517,13 @@ def ipo_status(ipo: dict) -> str:
         decided = rows("""SELECT COUNT(*) c FROM applications
                           WHERE ipo_id=? AND applied=1 AND allotment IN ('allotted','not_allotted')""",
                        (ipo["id"],))
-        return "allotment_done" if decided and decided[0]["c"] else "result_pending"
+        if decided and decided[0]["c"]:
+            return "allotment_done"
+        # no verdicts tracked here at all (e.g. an IPO you never applied in):
+        # the result PHASE still ends on allotment day — the chip must not say
+        # "awaited" for a month after results are public.
+        ad = ipo.get("allotment_date") or cd
+        return "allotment_done" if t > ad else "result_pending"
     return "open" if od else "upcoming"
 
 
@@ -587,12 +593,39 @@ def bigshare_companies(force=False):
     return comps
 
 
+
+
+def _bigshare_captcha_blocked(iid: int, mark: bool = False) -> bool:
+    """Bigshare's status form is captcha-gated (CaptchaToken/CaptchaAnswer +
+    ResultToken in its POST) — no app can auto-read it. Remember per-IPO so the
+    auto-sweeps stop burning 15 requests × 48×/day into a wall, while manual
+    taps still get ONE honest attempt."""
+    try:
+        j = json.loads(kv_get("bigshare_captcha", "{}") or "{}")
+    except (TypeError, ValueError):
+        j = {}
+    if mark:
+        j[str(iid)] = today_str()
+        kv_set("bigshare_captcha", json.dumps(j))
+    return str(iid) in j
+
+
+def _bigshare_captcha_result(ipo):
+    return {"status": "captcha",
+            "note": "Bigshare asks a captcha before every search — no app can auto-read it. "
+                    "Open the registrar page, check each PAN, then tap the Allotment cell of that row here.",
+            "link": REGISTRAR_LINKS["Bigshare"], "matched_company": ipo.get("name", "")}
+
 def check_bigshare(ipo, acc):
     """Return dict(status, allotted_qty, note, matched_company)."""
+    if _bigshare_captcha_blocked(ipo.get("id")):
+        return _bigshare_captcha_result(ipo)
     try:
         comps = bigshare_companies()
     except Exception as e:
-        return {"status": "manual", "note": f"Bigshare page unreachable ({e})", "link": REGISTRAR_LINKS["Bigshare"]}
+        _bigshare_captcha_blocked(ipo.get("id"), mark=True)
+        print(f"[bigshare] page probe failed, treating as captcha-walled: {e}", flush=True)
+        return _bigshare_captcha_result(ipo)
     target = norm_name(ipo["name"])
     match = None
     if ipo.get("registrar_ref"):
@@ -630,12 +663,23 @@ def check_bigshare(ipo, acc):
         r.raise_for_status()
         d = r.json().get("d")
     except Exception as e:
+        blob_err = str(e).lower()
+        if "captcha" in blob_err or "500" in blob_err or "error" in blob_err:
+            _bigshare_captcha_blocked(ipo.get("id"), mark=True)
+            print(f"[bigshare] API rejected without captcha ({e}) — flagging captcha-walled", flush=True)
+            return _bigshare_captcha_result(ipo)
         return {"status": "manual", "note": f"Bigshare API error ({e})", "link": REGISTRAR_LINKS["Bigshare"]}
 
+    b0 = json.dumps(d).lower()
+    if "captcha" in b0 or "invalid" in b0:
+        _bigshare_captcha_blocked(ipo.get("id"), mark=True)
+        print("[bigshare] response demands captcha — flagging captcha-walled", flush=True)
+        return _bigshare_captcha_result(ipo)
     if isinstance(d, str):
         d = {"raw": d}
     if not isinstance(d, dict):
-        return {"status": "manual", "note": "Unexpected Bigshare response", "link": REGISTRAR_LINKS["Bigshare"]}
+        _bigshare_captcha_blocked(ipo.get("id"), mark=True)
+        return _bigshare_captcha_result(ipo)
 
     blob = json.dumps(d)
     if "No data found" in blob:
@@ -1107,26 +1151,45 @@ def _ipoji_listing_date(name: str) -> str:
     return ""
 
 
-def recover_stale_listings(limit=6):
+def recover_stale_listings(limit=12):
     """Auto-heal the RESULT AWAITED stragglers: an IPO whose tentative listing
     date wasn't published when the scrapers first saw it drops off the source
     dashboards once it closes, so nothing ever back-fills listing_date and the
     chip sticks at RESULT AWAITED forever. Sweep those rows via IPOJi's
-    per-IPO calendar, then let the CMP cycle pick up live prices."""
+    per-IPO calendar, then let the CMP cycle pick up live prices.
+
+    Failure cooldown: a name IPOJi can't resolve gets 5 attempts, then is
+    paused for 7 days so it can't starve newer IPOs of their daily sweep."""
     t = today_str()
     stale = rows("""SELECT id, name FROM ipos
                     WHERE COALESCE(listing_date,'')='' AND COALESCE(close_date,'')<>''
                       AND close_date < ? ORDER BY close_date ASC LIMIT ?""", (t, limit))
+    try:
+        fails = json.loads(kv_get("ipo_recover_fails", "{}") or "{}")
+    except (TypeError, ValueError):
+        fails = {}
+    cutoff = (ist_now().date() - timedelta(days=7)).isoformat()
     fixed = []
+    changed = False
     for i in stale:
+        f = fails.get(str(i["id"]))
+        if f and f[0] >= 5 and f[1] >= cutoff:
+            continue  # in cooldown after repeated unrecoverable failures
         ld = _ipoji_listing_date(i["name"])
         if not ld:
+            fails[str(i["id"])] = [(f[0] if f else 0) + 1, t]
+            changed = True
             continue
         # never clobber a date the user set meanwhile (or another writer raced in)
         run("UPDATE ipos SET listing_date=? WHERE id=? AND COALESCE(listing_date,'')=''",
             (ld, i["id"]))
+        if str(i["id"]) in fails:
+            del fails[str(i["id"])]
+            changed = True
         fixed.append({"name": i["name"], "listing_date": ld})
-    if fixed:
+    if changed:
+        kv_set("ipo_recover_fails", json.dumps(fails))
+    if fixed or changed:
         schedule_backup()
     return fixed
 
@@ -2905,6 +2968,8 @@ def scheduler():
                     for p in rows("SELECT * FROM ipos"):
                         if ipo_status(p) != "result_pending" or p["registrar"] not in ENGINES:
                             continue
+                        if p["registrar"] == "Bigshare" and _bigshare_captcha_blocked(p["id"]):
+                            continue  # captcha wall — auto-sweeping is pointless, user checks manually
                         if not rows("""SELECT 1 x FROM applications
                                        WHERE ipo_id=? AND applied=1 AND allotment='pending' LIMIT 1""",
                                     (p["id"],)):

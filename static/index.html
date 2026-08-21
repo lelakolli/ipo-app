@@ -1010,14 +1010,23 @@ window.runAllotmentCheck=async()=>{
   box.innerHTML='<div class="mut">Querying '+esc(ipoById(selIpo).registrar)+' for every account… (5–20 sec)</div>';
   try{
     const r=await api(`/api/ipos/${selIpo}/check_allotment`,'POST');
-    box.innerHTML=r.results.map(x=>{
-      const col=x.status==='ok'?'var(--grn)':(x.status==='not_found'?'var(--amb)':'var(--mut)');
-      const lbl=x.status==='ok'?`✅ Allotted ${x.allotted_qty||''} sh`:(x.status==='not_found'?'❌ No allotment record':(x.status==='manual'?'🖐 Check manually':'⚠ '+x.status));
+    const ipo=ipoById(selIpo);
+    const cap=r.results.find(x=>x.status==='captcha');
+    const capCard=cap?`<div style="border-color:var(--amb)">🧩 <b>${esc(ipo.registrar)} needs a captcha</b> — by design, no app can auto-read it (that's the site protecting itself, not the app being lazy).<br>
+      <ol class="mut" style="margin:7px 0 2px 18px;line-height:1.7;font-size:12.5px">
+        <li>Tap <b>Open registrar →</b> below (or the 🔗 Registrar page button up top)</li>
+        <li>Select company <b>${esc(ipo.name)}</b> → type <b>PAN</b> or <b>CDSL BO ID</b> (see Accounts tab)</li>
+        <li>Solve the captcha → Search → note Allotted / Not allotted</li>
+        <li>Back here: tap that row's <b>Allotment</b> cell — refund auto-fills; tap <b>🔓 All funds unblocked</b> when money returns</li>
+      </ol></div>`:'';
+    box.innerHTML=capCard+r.results.map(x=>{
+      const col=x.status==='ok'?'var(--grn)':(x.status==='not_found'||x.status==='captcha'?'var(--amb)':'var(--mut)');
+      const lbl=x.status==='ok'?`✅ Allotted ${x.allotted_qty||''} sh`:(x.status==='not_found'?'❌ No allotment record':(x.status==='captcha'?'🧩 Verify manually (captcha)':(x.status==='manual'?'🖐 Check manually':'⚠ '+x.status)));
       return `<div><b>${esc(x.holder)}</b> — <span style="color:${col};font-weight:650">${lbl}</span>
         ${x.note?`<br><span class="mut">${esc(x.note)}</span>`:''}
         ${x.matched_company?`<br><span class="mut">matched: ${esc(x.matched_company)}</span>`:''}
         ${x.link?`<br><a href="${esc(x.link)}" target="_blank" rel="noopener">Open registrar →</a>`:''}</div>`;}).join('');
-    toast('Allotment check complete');
+    toast(cap?'🧩 Captcha wall — follow the manual guide above':'Allotment check complete');
   }catch(e){box.innerHTML='<div class="neg">Check failed: '+esc(e.message)+'</div>';}
   btn.disabled=false;btn.textContent='🔍 Auto-check allotment ('+ipoById(selIpo).registrar+')';
   refreshHard();};
