@@ -167,6 +167,15 @@ _GH_REPO = os.environ.get("GITHUB_REPO", "").strip()  # "username/repo"
 _GH_PATH = "data/live-backup.json"
 _bak_timer = None
 _bak_pending = False
+_bak_last_ok = ""  # IST timestamp of the last write that became durable somewhere
+                   # (GitHub push, or at least the on-disk local copy). Surfaced
+                   # in /api/state so the phone can show a visible "saved" pulse —
+                   # if a tap doesn't move this clock, the user can SEE it.
+
+
+def _mark_backup_ok():
+    global _bak_last_ok
+    _bak_last_ok = ist_now().isoformat(timespec="seconds")
 
 
 def export_backup() -> dict:
@@ -243,12 +252,14 @@ def _do_backup():
         payload = json.dumps(export_backup(), ensure_ascii=False)
         try:
             LOCAL_BACKUP.write_text(payload, encoding="utf-8")
+            _mark_backup_ok()
         except Exception:
             pass
         if _GH_TOKEN and _GH_REPO:
             try:
                 _github_push(payload)
                 _bak_pending = False
+                _mark_backup_ok()
                 print("[backup] pushed to GitHub", flush=True)
             except Exception as e:
                 print("[backup] GitHub push failed (local copy kept):", e, flush=True)
@@ -276,6 +287,7 @@ def _flush_backup_on_exit():
         if _bak_pending and _GH_TOKEN and _GH_REPO:
             _github_push(json.dumps(export_backup(), ensure_ascii=False))
             _bak_pending = False
+            _mark_backup_ok()
     except Exception:
         pass
 
@@ -292,11 +304,13 @@ def backup_now():
         payload = json.dumps(export_backup(), ensure_ascii=False)
         try:
             LOCAL_BACKUP.write_text(payload, encoding="utf-8")
+            _mark_backup_ok()
         except Exception:
             pass
         if _GH_TOKEN and _GH_REPO:
             try:
                 _github_push(payload)
+                _mark_backup_ok()
             except Exception as e:
                 print("[backup] instant GitHub push failed (local copy kept):", e, flush=True)
     except Exception as e:
@@ -1972,6 +1986,7 @@ def state():
         "charges": charges_store(),
         "today": today_str(),
         "mobile": mobile_info(),
+        "backup_at": _bak_last_ok,  # visible save pulse ("" until first write of this boot)
     }
 
 

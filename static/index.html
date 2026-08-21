@@ -146,6 +146,7 @@ main{padding-bottom:8px}
 <header>
   <h1>📈 IPO <span>Command Center</span></h1>
   <span class="badge" id="hdr-counts">…</span>
+  <span class="mut" id="hdr-backup" style="font-size:11px;align-self:center" title="Time (IST) your changes last became safely backed up — watch it move after every tap">💾 —</span>
   <button class="bellbtn" id="bell" onclick="toggleAlerts()" title="Alerts & reminders">🔔<span id="bell-count"></span></button>
   <nav>
     <button data-tab="dash" class="on" data-ic="🏠">Dashboard</button>
@@ -219,10 +220,15 @@ const unrealPnl=(a,ipo)=>a.allotment==='allotted'?( (ipo.cmp||0)-costPerShare(a)
 
 async function refresh(){S=await api('/api/state');
   document.getElementById('hdr-counts').textContent=`${S.accounts.filter(a=>a.active).length} accounts • ${S.ipos.filter(i=>i.status==='open').length} IPOs open`;
+  const hb=document.getElementById('hdr-backup');if(hb)hb.textContent=S.backup_at?('💾 saved '+S.backup_at.slice(11,16)):'💾 —';
   render();}
-// After a one-tap write: if the reload itself fails (network blip), SAY SO —
-// otherwise a stale screen looks exactly like "the save didn't happen".
-const refreshHard=()=>refresh().catch(()=>toast('Saved on server ✓ — but screen reload failed. Close & reopen to see the latest.',1));
+// After a one-tap write: (1) if the reload fails (network blip), SAY SO — a
+// stale screen must never look like "the save didn't happen"; (2) PROVE the
+// server kept the write (verify-after-write) — even a failure mode we have
+// not imagined yet surfaces as a loud ⚠, never silent wrong numbers.
+const refreshHard=(check)=>refresh().then(()=>{
+  if(check&&!check())toast('⚠ Server did not keep that change — tap it again; if it repeats, tell me.',1);
+}).catch(()=>toast('Saved on server ✓ — but screen reload failed. Close & reopen to see the latest.',1));
 
 // ---------- tabs ----------
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{curTab=b.dataset.tab;
@@ -827,7 +833,7 @@ window.applyAll=async()=>{
   const amt=ipo.price_max&&ipo.lot_size?ipo.price_max*ipo.lot_size*lots:0;
   if(!confirm(`Apply 1 lot in "${ipo.name}" for all ${active.length} active accounts${amt?` (~${rs(amt)} each, ${kr(amt*active.length)} total)`:''}?\nUPI auto-fills from each account's default.`))return;
   const r=await api(`/api/ipos/${selIpo}/apply`,'POST',{lots,category:'Retail'});
-  toast(`Applied for ${r.applied} accounts ✔`);refreshHard();};
+  toast(`Applied for ${r.applied} accounts ✔`);refreshHard(()=>S.applications.filter(x=>x.ipo_id===ipo.id&&x.applied).length>=S.accounts.filter(a=>a.active).length);};
 function _bufToB64(b){return btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 window.fpRegister=async()=>{
   if(!('credentials' in navigator)||!window.PublicKeyCredential)return toast('This browser does not support biometrics',1);
@@ -868,7 +874,7 @@ window.markAllMandates=async()=>{
   const ipo=ipoById(selIpo);
   if(!confirm(`Mark UPI mandate APPROVED for every account in "${ipo.name}"?`))return;
   const r=await api(`/api/ipos/${selIpo}/mandates`,'POST',{status:'approved'});
-  toast(`✓ ${r.updated} mandates marked approved`);refreshHard();};
+  toast(`✓ ${r.updated} mandates marked approved`);refreshHard(()=>!S.applications.some(x=>x.ipo_id===+selIpo&&x.applied&&x.mandate_status!=='approved'));};
 window.unblockAllFunds=async()=>{
   const ipo=ipoById(selIpo);if(!ipo)return;
   const pend=S.applications.filter(x=>x.ipo_id===ipo.id&&x.applied&&x.refund==='pending');
@@ -879,7 +885,7 @@ window.unblockAllFunds=async()=>{
     const r=await api(`/api/ipos/${ipo.id}/funds_unblocked`,'POST',{});
     if(!r.unblocked)toast('⚠ Server found nothing to unblock — the screen was stale; reloaded below.',1);
     else toast(`🔓 ${r.unblocked} fund${r.unblocked===1?'':'s'} unblocked ✓ — ${kr(amt)} released`);
-  }finally{refreshHard();}};
+  }finally{refreshHard(()=>!S.applications.some(x=>x.ipo_id===ipo.id&&x.applied&&x.refund==='pending'));}};
 window.checkOne=async(accId)=>{
   const ap=appFor(selIpo,accId);
   const body={ipo_id:selIpo,account_id:accId,category:'Retail'};
@@ -894,13 +900,13 @@ window.soldAllCmp=async()=>{
   if(!n)return toast('Nothing left to sell — every allotted row is already fully sold ✓');
   if(!confirm(`Book ALL ${n} allotted row${n===1?'':'s'} of "${ipo.name}" as SOLD at CMP ₹${num(ipo.cmp)} each?`))return;
   const r=await api(`/api/ipos/${ipo.id}/sold_all`,'POST',{});
-  toast(`💰 ${r.sold_rows} rows sold @ ₹${num(r.price)} — P&L locked ✓`);refreshHard();};
+  toast(`💰 ${r.sold_rows} rows sold @ ₹${num(r.price)} — P&L locked ✓`);refreshHard(()=>!S.applications.some(x=>x.ipo_id===ipo.id&&x.allotment==='allotted'&&(x.allotted_qty-(x.sell_qty||0))>0));};
 window.soldAllPrice=async()=>{
   const ipo=ipoById(selIpo);if(!ipo)return;
   const p=prompt(`Sell price per share for ALL allotted rows of "${ipo.name}"?`,ipo.cmp||'');
   if(!p||isNaN(+p)||+p<=0)return;
   const r=await api(`/api/ipos/${ipo.id}/sold_all`,'POST',{price:+p});
-  toast(`💰 ${r.sold_rows} rows sold @ ₹${num(r.price)} — P&L locked ✓`);refreshHard();};
+  toast(`💰 ${r.sold_rows} rows sold @ ₹${num(r.price)} — P&L locked ✓`);refreshHard(()=>!S.applications.some(x=>x.ipo_id===ipo.id&&x.allotment==='allotted'&&(x.allotted_qty-(x.sell_qty||0))>0));};
 window.runAllotmentCheck=async()=>{
   const btn=document.getElementById('chkbtn');btn.disabled=true;btn.textContent='Checking…';
   const box=document.getElementById('checkres');box.style.display='block';
