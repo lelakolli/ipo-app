@@ -72,7 +72,7 @@ header h1 span{background:linear-gradient(100deg,var(--gold),#f2cd6b);-webkit-ba
 .sev-high{border-left:3px solid var(--red)}.sev-med{border-left:3px solid var(--amb)}.sev-info{border-left:3px solid var(--acc)}
 .badge{background:var(--card2);border:1px solid var(--line);border-radius:999px;padding:4px 12px;font-size:12px;color:var(--mut);
   font-variant-numeric:tabular-nums;letter-spacing:.2px}
-nav{display:flex;gap:4px;margin-left:auto;flex-wrap:wrap}
+nav{display:flex;gap:4px;flex-wrap:wrap;padding:10px 22px;border-bottom:1px solid var(--line);background:var(--header-bg)}
 nav button{background:none;border:1px solid transparent;color:var(--mut);padding:7px 14px;border-radius:11px;cursor:pointer;
   font-size:13.5px;font-weight:600;transition:color .16s var(--ease),background .16s var(--ease)}
 nav button:hover{color:var(--txt)}
@@ -200,7 +200,7 @@ input.wide{width:150px}
   header{padding:10px 12px;gap:7px}
   header h1{font-size:15px}
   .badge{font-size:11px;padding:3px 9px}
-  nav{margin-left:0;width:100%;overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px}
+  nav{margin-left:0;width:100%;overflow-x:auto;flex-wrap:nowrap;padding:8px 12px}
   nav button{padding:7px 10px;font-size:12.5px;white-space:nowrap}
   main{padding:12px 10px}
   th,td{font-size:12px;padding:6px 7px}
@@ -244,6 +244,10 @@ main{padding-bottom:8px}
   <span class="mut" id="hdr-backup" style="font-size:11px;align-self:center" title="Time (IST) your changes last became safely backed up — watch it move after every tap">💾 —</span>
   <span class="hk"></span>
   <button class="bellbtn" id="bell" onclick="toggleAlerts()" title="Alerts & reminders">🔔<span id="bell-count"></span></button>
+
+  <button class="bellbtn themebtn" id="themebtn" onclick="toggleTheme()" title="Switch dark / light">☀️</button>
+  <button class="bellbtn" onclick="logout()" title="Log out on this device"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" style="vertical-align:-3.5px"><path d="M12 2.5v10"/><path d="M18.7 6.4a8.3 8.3 0 1 1-13.4 0"/></svg></button>
+</header>
   <nav>
     <button data-tab="dash" class="on" data-ic="🏠">Dashboard</button>
     <button data-tab="ipos" data-ic="📋">IPOs</button>
@@ -252,9 +256,6 @@ main{padding-bottom:8px}
     <button data-tab="accounts" data-ic="👥">Accounts</button>
     <button data-tab="pnl" data-ic="💰">P&amp;L</button>
   </nav>
-  <button class="bellbtn themebtn" id="themebtn" onclick="toggleTheme()" title="Switch dark / light">☀️</button>
-  <button class="bellbtn" onclick="logout()" title="Log out on this device"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" style="vertical-align:-3.5px"><path d="M12 2.5v10"/><path d="M18.7 6.4a8.3 8.3 0 1 1-13.4 0"/></svg></button>
-</header>
 <main>
   <section id="tab-dash"></section>
   <section id="tab-ipos" style="display:none"></section>
