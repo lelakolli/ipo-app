@@ -166,6 +166,10 @@ SEED_BACKUP = DB.parent / "seed-backup.json"
 _GH_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 _GH_REPO = os.environ.get("GITHUB_REPO", "").strip()  # "username/repo"
 _GH_PATH = "data/live-backup.json"
+_GH_BRANCH = "data-backup"  # backups live on this branch so Render's builds (main) never see them —
+                            # every backup commit on main used to burn paid pipeline minutes AND
+                            # restart the live app mid-session (the cause of the table-rollback bug)
+_branch_state = {"checked": False, "ok": False}
 _bak_timer = None
 _bak_pending = False
 _bak_last_ok = ""  # IST timestamp of the last write that became durable somewhere
@@ -220,13 +224,41 @@ def _gh_headers():
             "User-Agent": "ipo-command-center"}
 
 
+def _gh_branch_ready():
+    """Ensure the backup branch exists (checked once per process). If the branch
+    can't be verified/created, fall back to pushing to main — the data matters
+    more than the deploy noise."""
+    if _branch_state["checked"]:
+        return _branch_state["ok"]
+    _branch_state["checked"] = True
+    try:
+        base = f"https://api.github.com/repos/{_GH_REPO}/git"
+        r = requests.get(f"{base}/ref/heads/{_GH_BRANCH}", headers=_gh_headers(), timeout=15)
+        if r.status_code == 200:
+            _branch_state["ok"] = True
+            return True
+        m = requests.get(f"{base}/ref/heads/main", headers=_gh_headers(), timeout=15)
+        m.raise_for_status()
+        main_sha = m.json()["object"]["sha"]
+        c = requests.post(f"{base}/refs", headers=_gh_headers(), timeout=15,
+                          json={"ref": f"refs/heads/{_GH_BRANCH}", "sha": main_sha})
+        _branch_state["ok"] = c.status_code in (201, 422)  # 422 = race: already exists
+        if not _branch_state["ok"]:
+            print(f"[backup] branch create returned {c.status_code} (using main)", flush=True)
+    except Exception as e:
+        print("[backup] backup-branch check failed (using main):", e, flush=True)
+        _branch_state["ok"] = False
+    return _branch_state["ok"]
+
+
 def _github_push(content: str):
+    br = _GH_BRANCH if _gh_branch_ready() else "main"
     api = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_PATH}"
     sha = None
-    r = requests.get(api, headers=_gh_headers(), timeout=15)
+    r = requests.get(api, headers=_gh_headers(), params={"ref": br}, timeout=15)
     if r.status_code == 200:
         sha = r.json().get("sha")
-    body = {"message": "auto-backup",
+    body = {"message": "auto-backup (data branch, no deploy)", "branch": br,
             "content": base64.b64encode(content.encode()).decode()}
     if sha:
         body["sha"] = sha
@@ -236,15 +268,22 @@ def _github_push(content: str):
 def _github_fetch():
     if not (_GH_TOKEN and _GH_REPO):
         return None
-    try:
-        api = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_PATH}"
-        r = requests.get(api, headers=_gh_headers(), timeout=15)
-        if r.status_code != 200:
+    api = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_PATH}"
+    # newest writes live on the data-backup branch; backups written by older
+    # app versions only ever existed on main — read branch first, fall back so
+    # nothing gets stranded
+    for params in ({"ref": _GH_BRANCH}, {}):
+        try:
+            r = requests.get(api, headers=_gh_headers(), params=params, timeout=15)
+            if r.status_code == 200:
+                d = json.loads(base64.b64decode(r.json()["content"]).decode())
+                if isinstance(d, dict) and d.get("tables"):
+                    return d
+                print(f"[backup] payload on ref {params.get('ref', 'main')} is not a backup — trying next", flush=True)
+        except Exception as e:
+            print("[backup] GitHub fetch failed:", e, flush=True)
             return None
-        return json.loads(base64.b64decode(r.json()["content"]).decode())
-    except Exception as e:
-        print("[backup] GitHub fetch failed:", e, flush=True)
-        return None
+    return None
 
 
 def _do_backup():
