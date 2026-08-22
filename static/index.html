@@ -807,6 +807,8 @@ function renderApps(){
   const ipo=selIpo?ipoById(selIpo):null;
   if(!ipo){el.innerHTML='<div class="card mut">Add an IPO first (IPOs tab).</div>';return;}
   const accts=S.accounts.filter(a=>a.active||appFor(ipo.id,a.id));
+  const bsLink=(ipo.registrar||'').toLowerCase()==='bigshare'&&ipo.status!=='listed';
+  const accName=a=>bsLink?`<a href="/bs/open?ipo=${ipo.id}&acc=${a.id}" target="_blank" rel="noopener" title="Opens the real Bigshare page through the app — company + PAN pre-filled; you only read the captcha and tap SEARCH" style="color:var(--acc2);text-decoration:none;font-weight:700">${esc(a.holder)} 🔗</a>`:`<b>${esc(a.holder)}</b>`;
   const rowsHtml=accts.map(a=>{
     const ap=appFor(ipo.id,a.id)||{applied:0,lots:1,amount:0,upi:a.upi,mandate_status:'pending',allotment:'pending',allotted_qty:0,refund:'na',sell_qty:0,sell_price:0,sold_on:'',app_no:''};
     const dis=ap.applied?'':'disabled';
@@ -815,7 +817,7 @@ function renderApps(){
     const preListed=ap.allotment==='allotted'&&!(ipo.cmp>0)&&!(ap.sell_qty>0);
     const estTot=preListed&&ipo.gmp>0?ipo.gmp*ap.allotted_qty:null;
     return `<tr data-acc="${a.id}">
-    <td class="stick"><b>${esc(a.holder)}</b>${a.active?'':' <span class="chip c-closed">inactive</span>'}<br><span class="mut" style="font-size:11px">${esc(a.pan||a.cdsl||'no PAN/BO ID')}</span></td>
+    <td class="stick">${accName(a)}${a.active?'':' <span class="chip c-closed">inactive</span>'}<br><span class="mut" style="font-size:11px">${esc(a.pan||a.cdsl||'no PAN/BO ID')}</span></td>
     <td><input type="checkbox" class="f-applied" ${ap.applied?'checked':''}></td>
     <td><select class="mini f-allot" ${dis}>${['pending','allotted','not_allotted'].map(s=>`<option value="${s}" ${ap.allotment===s?'selected':''}>${s.replace('_',' ')}</option>`).join('')}</select></td>
     <td class="upi-def"><span class="mut" style="font-size:11.5px" title="This account's default UPI ID (set in Accounts tab)">${a.upi?esc(a.upi):'<span class="neg">not set</span>'}</span>
@@ -1012,13 +1014,13 @@ window.runAllotmentCheck=async()=>{
     const r=await api(`/api/ipos/${selIpo}/check_allotment`,'POST');
     const ipo=ipoById(selIpo);
     const cap=r.results.find(x=>x.status==='captcha');
-    const capCard=cap?`<div style="border-color:var(--amb)">🧩 <b>${esc(ipo.registrar)} needs a captcha</b> — by design, no app can auto-read it (that's the site protecting itself, not the app being lazy).<br>
-      <ol class="mut" style="margin:7px 0 2px 18px;line-height:1.7;font-size:12.5px">
-        <li>Tap <b>Open registrar →</b> below (or the 🔗 Registrar page button up top)</li>
-        <li>Select company <b>${esc(ipo.name)}</b> → type <b>PAN</b> or <b>CDSL BO ID</b> (see Accounts tab)</li>
-        <li>Solve the captcha → Search → note Allotted / Not allotted</li>
-        <li>Back here: tap that row's <b>Allotment</b> cell — refund auto-fills; tap <b>🔓 All funds unblocked</b> when money returns</li>
-      </ol></div>`:'';
+    const capCard=cap?`<div style="border-color:var(--amb)">🧩 <b>${esc(ipo.registrar)} needs a captcha</b> — no app can read the picture for you, but the buttons below fill everything else.<br>
+      <div class="mut" style="margin:7px 0 6px;line-height:1.8;font-size:12.5px">
+        1️⃣ Tap a name → the real registrar page opens with <b>company + PAN already filled</b><br>
+        2️⃣ Type the captcha letters → <b>SEARCH</b> → note Allotted / Not allotted (repeat per name)<br>
+        3️⃣ Back here: tap that row's <b>Allotment</b> cell; tap <b>🔓 All funds unblocked</b> when money returns
+      </div>
+      <div>${r.results.map(x=>`<a class="btn sm" style="margin:2px 5px 2px 0" href="/bs/open?ipo=${ipo.id}&acc=${x.account_id}" target="_blank" rel="noopener">🔗 ${esc(x.holder)}</a>`).join('')}</div></div>`:'';
     box.innerHTML=capCard+r.results.map(x=>{
       const col=x.status==='ok'?'var(--grn)':(x.status==='not_found'||x.status==='captcha'?'var(--amb)':'var(--mut)');
       const lbl=x.status==='ok'?`✅ Allotted ${x.allotted_qty||''} sh`:(x.status==='not_found'?'❌ No allotment record':(x.status==='captcha'?'🧩 Verify manually (captcha)':(x.status==='manual'?'🖐 Check manually':'⚠ '+x.status)));

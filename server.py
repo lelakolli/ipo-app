@@ -26,6 +26,7 @@ def ist_now():
 
 import requests
 from fastapi import FastAPI, HTTPException, Body, Response, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -1429,7 +1430,7 @@ if CONF_FILE.exists():
     CONF = json.loads(CONF_FILE.read_text())
 else:
     CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}
-    print("[boot] FIRST-RUN PASSCODE:", CONF["passcode"], "— change it in Settings after first login.", flush=True)
+    print(f"[boot] FIRST-RUN PASSCODE: {CONF['passcode']} — log in once, then change it in Settings", flush=True)
     try:
         CONF_FILE.write_text(json.dumps(CONF))
     except Exception:
@@ -1591,6 +1592,17 @@ async def passcode_gate(request, call_next):
     p = request.url.path
     if p in PUBLIC_PATHS or p.startswith("/static"):
         return await call_next(request)
+    if p.startswith("/bs/"):
+        # the assisted Bigshare page + its proxy carry account PANs — same
+        # session gate as the rest of the app; assets/XHR just get a 401
+        if _authed(request):
+            return await call_next(request)
+        if request.cookies.get("ipo_auth") and _cookie_brake(_client_ip(request)):
+            return JSONResponse({"ok": False, "error": "too many tries — wait 10 minutes"},
+                                status_code=429)
+        if p.startswith("/bs/p/"):
+            return JSONResponse({"ok": False, "error": "locked"}, status_code=401)
+        return HTMLResponse(UNLOCK_HTML)
     if p == "/" or p.startswith("/api"):
         if _authed(request):
             resp = await call_next(request)
@@ -1625,6 +1637,14 @@ async def security_headers(request, call_next):
         "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
         "connect-src 'self'; font-src 'self' data:; object-src 'none'; "
         "base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+    if request.url.path.startswith("/bs/"):
+        # the proxied Bigshare page pulls its own jQuery/fonts/icons from
+        # public CDNs and loads the captcha as a data: image — allow https:
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self' 'unsafe-inline' https:; "
+            "style-src 'self' 'unsafe-inline' https:; img-src 'self' data: https:; "
+            "connect-src 'self'; font-src 'self' data: https:; "
+            "object-src 'none'; base-uri 'self'")
     return resp
 
 
@@ -1647,6 +1667,208 @@ def _client_ip(request):
         if parts:
             return parts[-1]
     return request.client.host if request.client else "?"
+
+
+# ---------------------------------------------------------------------------
+# Bigshare assisted manual check.
+# Bigshare gates every search behind a human-read captcha, so no engine can
+# auto-read it. /bs/open serves the registrar's REAL page through us — keeping
+# it same-origin so the captcha image + search AJAX keep working — with the
+# company, selection type and PAN/BO-ID already filled in. The user only reads
+# one picture and taps SEARCH. Everything the page needs afterwards (assets,
+# Captcha.ashx, Data.aspx/FetchIpodetails) flows through /bs/p/... which
+# forwards to Bigshare, so their cookies/rate-limits behave exactly like a
+# direct visit. We save the typing — never the human check.
+# ---------------------------------------------------------------------------
+BS_ORIGIN = "https://ipo.bigshareonline.com"
+BS_PAGE = BS_ORIGIN + "/ipo_status.html"
+_BS_BAD = re.compile(r"[^A-Za-z0-9._~/%-]")
+
+
+def _bs_esc(s: str) -> str:
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _bs_rewrite_cookie(sc: str) -> str:
+    """Re-scope an upstream Set-Cookie to our origin so the browser returns it
+    only under /bs (and the proxy then forwards it to Bigshare)."""
+    parts = [p.strip() for p in sc.split(";")
+             if p.strip() and not p.strip().lower().startswith(("domain=", "path=", "samesite"))]
+    parts.append("Path=/bs")
+    parts.append("SameSite=Lax")
+    return "; ".join(parts)
+
+
+def _bs_set_cookies(resp, upstream) -> None:
+    try:
+        raw = upstream.raw.headers.getlist("set-cookie")
+    except Exception:
+        raw = []
+    if not raw:  # fallback when raw headers are unavailable (mocks/tests)
+        try:
+            raw = [f"{k}={v}" for k, v in upstream.cookies.items()]
+        except Exception:
+            raw = []
+    for sc in raw:
+        resp.raw_headers.append((b"set-cookie", _bs_rewrite_cookie(sc).encode()))
+
+
+def _bs_company_options(html: str):
+    m = re.search(r'<select id="ddlCompany">(.*?)</select>', html, re.S)
+    if not m:
+        return []
+    return [{"id": v, "name": n.strip()} for v, n in
+            re.findall(r'<option value="(\d+)">([^<]+)</option>', m.group(1))]
+
+
+def _bs_match_company(options, ipo):
+    if ipo.get("registrar_ref"):
+        hit = next((c for c in options if c["id"] == str(ipo["registrar_ref"]).strip()), None)
+        if hit:
+            return hit
+    target = norm_name(ipo["name"])
+    for c in options:
+        if norm_name(c["name"]) == target:
+            return c
+    for c in options:
+        n = norm_name(c["name"])
+        if target and (target in n or n in target):
+            return c
+    return None
+
+
+# Injected at the end of the proxied page: waits for the company list, selects
+# our IPO, picks PAN (or BO ID) mode, fills the value, lands the cursor on the
+# captcha box and pins a guidance bar. Pure vanilla JS — jQuery may lag behind.
+_BS_FILL_SCRIPT = """<script>(function(){
+var F=window.__BSFILL__||{},tries=0;
+function bar(html){var d=document.getElementById('ipoassistbar');
+if(!d){d=document.createElement('div');d.id='ipoassistbar';
+d.style.cssText='position:fixed;left:8px;right:8px;bottom:8px;z-index:2147483000;background:#0f1824;color:#e9eff6;border:1px solid #14b8a6;border-radius:12px;padding:12px 40px 12px 14px;font:14px/1.55 system-ui,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.55)';
+var x=document.createElement('button');x.textContent='\\u2715';
+x.style.cssText='position:absolute;top:8px;right:10px;background:none;border:0;color:#8fa3b8;font-size:17px;cursor:pointer';
+x.onclick=function(){d.remove();};
+var s=document.createElement('span');d.appendChild(s);d.appendChild(x);
+(document.body||document.documentElement).appendChild(d);}
+d.querySelector('span').innerHTML=html;}
+function go(){var sel=document.getElementById('ddlCompany');
+if(!sel){if(++tries<60)setTimeout(go,300);return;}
+if((sel.options||[]).length<2){if(++tries<60)setTimeout(go,300);return;}
+var okCo=false;
+if(F.companyId){sel.value=F.companyId;okCo=(sel.value===F.companyId);}
+if(!okCo&&F.companyName){var toks=String(F.companyName).toUpperCase().split(/[^A-Z0-9]+/).filter(function(w){return w.length>3});
+for(var i=0;i<sel.options.length;i++){var t=(sel.options[i].text||'').toUpperCase();
+if(toks.length&&toks.every(function(w){return t.indexOf(w)>=0})){sel.selectedIndex=i;okCo=true;break;}}}
+try{sel.dispatchEvent(new Event('change',{bubbles:true}));}catch(e){}
+var st=document.getElementById('SelectionType');
+if(st&&F.selType){st.value=F.selType;try{st.dispatchEvent(new Event('change',{bubbles:true}));}catch(e){}}
+var f2='';
+if(F.selType==='PN'&&F.pan){var p=document.getElementById('txtpan');if(p){p.value=F.pan;f2='PAN <b>'+F.pan+'</b> filled';}}
+else if(F.selType==='BN'&&F.cdsl){var ty=document.getElementById('ddlType');if(ty){ty.value='CDSL';}
+var c=document.getElementById('txtcsdl');if(c){c.value=F.cdsl;f2='BO ID <b>'+F.cdsl+'</b> filled';}}
+var co=sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].text:'';
+bar((okCo?'\\u2705 <b>'+co+'</b> selected':'\\u26A0 Company not in the list yet (allotment link may not be live) \\u2014 pick <b>'+(F.companyName||'')+'</b> yourself')
++'<br>'+(f2?f2+' for <b>'+(F.accName||'')+'</b>.':'No PAN/BO ID stored for <b>'+(F.accName||'')+'</b> \\u2014 type it yourself.')
++'<br>Now just read the captcha picture and tap <b>SEARCH</b>.');
+var cap=document.getElementById('captcha-input');
+if(cap){setTimeout(function(){try{cap.scrollIntoView({block:'center'});cap.focus();}catch(e){}},700);}}
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',go);}else{go();}
+})();</script>"""
+
+_BS_DOWN_HTML = """<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+<body style="font-family:system-ui,sans-serif;background:#070d14;color:#e9eff6;padding:26px;line-height:1.6">
+<h2 style="margin:0 0 10px">Couldn&#39;t reach Bigshare just now</h2>
+<p class="mut" style="color:#8fa3b8">__MSG__</p>
+<p>Fallback: open the registrar page directly — pre-fill won&#39;t apply there, so pick the company and type your PAN yourself:<br>
+<a style="color:#2dd4bf" href="https://ipo.bigshareonline.com/ipo_status.html">ipo.bigshareonline.com/ipo_status.html</a></p></body>"""
+
+
+@app.get("/bs/open")
+def bs_open(ipo: int = 0, acc: int = 0):
+    ipo_r = rows("SELECT * FROM ipos WHERE id=?", (ipo,))
+    acc_r = rows("SELECT * FROM accounts WHERE id=?", (acc,))
+    if not ipo_r or not acc_r:
+        raise HTTPException(404, "unknown ipo/account")
+    i, a = ipo_r[0], acc_r[0]
+    if (i.get("registrar") or "").strip().lower() != "bigshare":
+        raise HTTPException(400, "assisted check exists only for Bigshare IPOs")
+    try:
+        r = requests.get(BS_PAGE, headers=UA, timeout=25)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"[bs-assist] upstream fetch failed: {e}", flush=True)
+        return HTMLResponse(_BS_DOWN_HTML.replace("__MSG__", _bs_esc(e)), status_code=502)
+    page = r.text
+    comp = _bs_match_company(_bs_company_options(page), i)
+    pan = (a.get("pan") or "").strip().upper()
+    cdsl = re.sub(r"\D", "", a.get("cdsl") or "")
+    fill = {"ipoName": i["name"], "accName": a.get("holder", ""),
+            "companyId": comp["id"] if comp else "",
+            "companyName": comp["name"] if comp else i["name"],
+            "selType": "PN" if pan else ("BN" if cdsl else ""),
+            "pan": pan, "cdsl": cdsl}
+    # every same-page reference (css/js/img/XHR) must stay inside the proxy:
+    # <base> rewrites RELATIVE urls to /bs/p/x/... ('x/' absorbs '../' hops and
+    # is stripped by the proxy); absolute https:// links are left untouched
+    if "<base" not in page.lower():
+        m = re.search(r"<head[^>]*>", page, re.I)
+        if m:
+            page = page[:m.end()] + '<base href="/bs/p/x/">' + page[m.end():]
+    inject = "<script>window.__BSFILL__=" + json.dumps(fill) + ";</script>" + _BS_FILL_SCRIPT
+    low = page.lower()
+    if "</body>" in low:
+        idx = low.rfind("</body>")
+        page = page[:idx] + inject + page[idx:]
+    else:
+        page += inject
+    resp = HTMLResponse(page)
+    _bs_set_cookies(resp, r)
+    print(f"[bs-assist] opened for ipo={ipo} acc={acc} company={fill['companyId'] or '-'}", flush=True)
+    return resp
+
+
+def _bs_rewrite_location(loc: str, base_url: str) -> str:
+    from urllib.parse import urljoin, urlparse
+    absu = urljoin(base_url, loc)
+    p = urlparse(absu)
+    if p.netloc and p.netloc.lower() != urlparse(BS_ORIGIN).netloc:
+        return absu  # leaving Bigshare entirely — let the browser go directly
+    out = "/bs/p" + (p.path if p.path.startswith("/") else "/" + p.path)
+    return out + (("?" + p.query) if p.query else "")
+
+
+@app.api_route("/bs/p/{upath:path}", methods=["GET", "POST", "HEAD"])
+async def bs_proxy(upath: str, request: Request):
+    if upath.startswith("x/"):
+        upath = upath[2:]
+    if not upath or ".." in upath or _BS_BAD.search(upath):
+        raise HTTPException(400, "bad upstream path")
+    url = BS_ORIGIN + "/" + upath
+    if request.url.query:
+        url += "?" + request.url.query
+    ck = {k: v for k, v in request.cookies.items() if k != "ipo_auth"}
+    hdrs = dict(UA)
+    hdrs["Referer"] = BS_PAGE
+    for h in ("content-type", "x-requested-with", "accept"):
+        v = request.headers.get(h)
+        if v:
+            hdrs[h.title()] = v
+    body = await request.body() if request.method == "POST" else None
+    try:
+        r = await run_in_threadpool(
+            lambda: requests.request(request.method, url, data=body, headers=hdrs,
+                                     cookies=ck, timeout=30, allow_redirects=False))
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"Bigshare unreachable: {e}"}, status_code=502)
+    resp = Response(content=r.content, status_code=r.status_code)
+    if r.headers.get("content-type"):
+        resp.headers["content-type"] = r.headers["content-type"]
+    if r.headers.get("location"):
+        resp.headers["location"] = _bs_rewrite_location(r.headers["location"], url)
+    if r.headers.get("retry-after"):
+        resp.headers["retry-after"] = r.headers["retry-after"]
+    _bs_set_cookies(resp, r)
+    return resp
 
 
 @app.post("/api/unlock")
