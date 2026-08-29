@@ -682,7 +682,15 @@ function renderIpos(){
       <button class="btn sm danger" onclick="delIpo(${i.id},'${jsq(i.name)}')">✕</button>
     </div>
   </div>`;};
-  const live=S.ipos.filter(i=>!archivable(i));
+  const liveAll=S.ipos.filter(i=>!archivable(i));
+  const bucket=i=>i.status==='open'?'open':(i.status==='upcoming'?'upcoming':'closed');
+  // 3-way view: Open (default) / Upcoming / Closed — choice remembered per device
+  const view=window.ipoView||(window.ipoView=localStorage.getItem('ipoView')||'open');
+  const vbtn=v=>{const meta={open:['📗 Open','subscription running now'],upcoming:['🗓 Upcoming','opens in the future'],closed:['📕 Closed','subscription over or listed']}[v];
+    const n=liveAll.filter(i=>bucket(i)===v).length;
+    return `<button class="btn sm ${view===v?'':'ghost'}" title="${meta[1]}" onclick="setIpoView('${v}')" style="min-width:92px">${meta[0]} <b>${n}</b></button>`;};
+  window.setIpoView=v=>{window.ipoView=v;localStorage.setItem('ipoView',v);renderIpos();};
+  const live=liveAll.filter(i=>bucket(i)===view);
   const arc=S.ipos.filter(archivable).sort((a,b)=>(b.listing_date||'').localeCompare(a.listing_date||''));
   el.innerHTML=`
   <div class="toolbar">
@@ -691,7 +699,10 @@ function renderIpos(){
     <button class="btn ghost" id="gmpbtn" onclick="refreshGmp()">💹 Refresh GMP</button>
     <span class="mut">GMP + subscription auto-refresh every 15 min (Chittorgarh + IPO Ji). CMP auto-fetches from listing day onwards. Settled IPOs auto-move to Archive after 10 days.</span>
   </div>
-  ${live.map(ipocard).join('')||'<div class="card mut">No IPOs yet — add manually or Sync live.</div>'}
+  <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap" role="tablist" aria-label="IPO view">
+    ${vbtn('open')}${vbtn('upcoming')}${vbtn('closed')}
+  </div>
+  ${live.map(ipocard).join('')||`<div class="card mut">${view==='open'?'No IPOs open right now — peek at 🗓 Upcoming, or tap 🔄 Sync live.':(view==='upcoming'?'No upcoming IPOs scheduled yet. Sync live to fetch the calendar.':'Nothing closed yet. Closed & listed IPOs land here once the subscription window passes.')}</div>`}
   ${arc.length?`<details style="margin-top:10px"><summary class="card" style="cursor:pointer;font-weight:600">🗃 Archive (${arc.length}) — listed, sold out & settled. Tap to expand.</summary><div style="height:8px"></div>${arc.map(ipocard).join('')}</details>`:''}`;
 }
 window.delIpo=async(id,name)=>{if(!confirm(`Delete "${name}" and all its application rows?`))return;
