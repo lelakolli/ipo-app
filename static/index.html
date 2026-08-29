@@ -746,15 +746,18 @@ function renderAccounts(){
   el.innerHTML=`
   <div class="toolbar"><button class="btn" onclick="accModal()">+ Add account</button>
   <span class="mut">Order is yours — use ▲▼ to arrange applicants. PAN <b>or</b> 16-digit CDSL BO ID per account powers allotment auto-check.</span></div>
-  <div class="card"><div style="overflow:auto"><table class="acctable"><thead><tr><th class="stick c1">#</th><th class="stick c2">Applicant</th><th>Booked P&L</th><th>Default UPI ID</th><th>Applications</th><th>PAN</th><th>BO ID</th><th></th></tr></thead><tbody>
+  <div class="card"><div style="overflow:auto"><table class="acctable"><thead><tr><th class="stick c1">#</th><th class="stick c2">Applicant</th><th>Booked P&L</th><th>Default UPI ID</th><th>Applications</th><th>IPOs allotted</th><th>PAN</th><th>BO ID</th><th></th></tr></thead><tbody>
   ${S.accounts.map((a,ix)=>{const apps=S.applications.filter(x=>x.account_id===a.id&&x.applied);
     const booked=apps.reduce((s,x)=>s+bookedPnl(x),0);
+    const wins=apps.filter(x=>x.allotment==='allotted');
+    const winNames=wins.map(x=>esc((ipoById(x.ipo_id)||{}).name||('IPO #'+x.ipo_id)));
     return `<tr>
     <td class="stick c1 mut">${ix+1}</td>
     <td class="stick c2"><b>${esc(a.holder)}</b>${a.active?'':' <span class="chip c-closed">inactive</span>'}${a.notes?`<br><span class="mut" style="font-size:11.5px">${esc(a.notes)}</span>`:''}</td>
     <td class="${pnlCls(booked)}">${apps.some(x=>x.sell_qty>0)?pnlTxt(booked):'—'}</td>
     <td><code>${esc(a.upi)||'<span class="mut">—</span>'}</code></td>
     <td>${apps.length}</td>
+    <td title="${winNames.join(', ')||'No allotments yet'}">${wins.length?`<b class="pos">${wins.length} ✓</b><br><span class="mut" style="font-size:11px">${winNames.slice(0,2).join(', ')}${winNames.length>2?` +${winNames.length-2} more`:''}</span>`:'<span class="mut">0</span>'}</td>
     <td>${esc(a.pan)||'<span class="mut">—</span>'}</td>
     <td>${esc(a.cdsl)||'<span class="mut">—</span>'}</td>
     <td class="row-actions" style="white-space:nowrap">
@@ -762,7 +765,7 @@ function renderAccounts(){
     <button class="btn sm ghost" onclick="moveAcc(${a.id},1)" title="Move down in the list">▼</button>
     <button class="btn sm ghost" onclick="accModal(${a.id})">Edit</button>
     <button class="btn sm danger" onclick="delAcc(${a.id},'${jsq(a.holder)}')">✕</button></td></tr>`;}).join('')
-    ||'<tr><td colspan="8" class="mut">No accounts yet — add your 15+ demat accounts here.</td></tr>'}
+    ||'<tr><td colspan="9" class="mut">No accounts yet — add your 15+ demat accounts here.</td></tr>'}
   </tbody></table></div></div>`;
 }
 window.moveAcc=async(id,dir)=>{
