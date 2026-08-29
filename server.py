@@ -942,8 +942,24 @@ def _mkdate(y, m, d):
 
 
 def _parse_issue_dates(txt):
-    """'11 to 13 Aug, 2026' -> (open, close)"""
-    m = re.search(r"(\d{1,2})\s*(?:to|-)\s*(\d{1,2})\s+([A-Za-z]{3})\w*[\s,]+(\d{4})", txt)
+    """'11 to 13 Aug, 2026' / '28 Aug to 1 Sep, 2026' / 'Aug 28 – Sep 01, 2026' -> (open, close).
+    Cross-month ranges used to slip past the range regex and hit the single-day
+    fallback, returning (close, close) — ESDS/Priority/Purple showed a 1-day
+    "window" and stayed 'upcoming' through their real open day."""
+    SEP = r"(?:to|-|–|—|till|until)"
+    ORD = r"(?:st|nd|rd|th)?"
+    # day-first cross-month: 28 Aug to 1 Sep, 2026 | 28th Aug - 1st Sep
+    m = re.search(rf"(\d{{1,2}}){ORD}\s+([A-Za-z]{{3}})\w*\s*{SEP}\s*(\d{{1,2}}){ORD}\s+([A-Za-z]{{3}})\w*[\s,]+(\d{{4}})", txt)
+    if m:
+        d1, mo1, d2, mo2, y = int(m.group(1)), m.group(2), int(m.group(3)), m.group(4), m.group(5)
+        return _mkdate(y, MONTH_MAP.get(mo1[:3].lower()), d1), _mkdate(y, MONTH_MAP.get(mo2[:3].lower()), d2)
+    # month-first cross-month: Aug 28 to Sep 1, 2026
+    m = re.search(rf"([A-Za-z]{{3}})\w*\s+(\d{{1,2}}){ORD}\s*{SEP}\s*([A-Za-z]{{3}})\w*\s+(\d{{1,2}}){ORD}[\s,]+(\d{{4}})", txt)
+    if m:
+        mo1, d1, mo2, d2, y = m.group(1), int(m.group(2)), m.group(3), int(m.group(4)), m.group(5)
+        return _mkdate(y, MONTH_MAP.get(mo1[:3].lower()), d1), _mkdate(y, MONTH_MAP.get(mo2[:3].lower()), d2)
+    # same month: 11 to 13 Aug, 2026
+    m = re.search(rf"(\d{{1,2}})\s*{SEP}\s*(\d{{1,2}})\s+([A-Za-z]{{3}})\w*[\s,]+(\d{{4}})", txt)
     if not m:
         m = re.search(r"(\d{1,2})\s+([A-Za-z]{3})\w*[\s,]+(\d{4})", txt)  # single day
         if m:
