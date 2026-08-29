@@ -2558,6 +2558,14 @@ def save_application(b: dict = Body(...)):
     for k in ("app_no", "category", "upi", "checked_note"):
         if k in b and b[k] is not None:
             fields[k] = str(b[k])[:120]
+    # Cross-field invariants — the Allotment and Refund dropdowns must never
+    # drift apart (they used to: marking not_allotted left refund at n/a so the
+    # money stayed "blocked" forever; marking allotted left refund pending so
+    # shares AND money counted at once). a 'received' refund is never rewound.
+    if fields.get("allotment") == "allotted":
+        fields["refund"] = "na"          # money became shares — no refund to track
+    elif fields.get("allotment") == "not_allotted" and fields.get("refund") in (None, "na"):
+        fields["refund"] = "pending"     # money must come back — start tracking
     aid = upsert_app(ipo_id, acc_id, fields, auto_amount=("amount" not in b))
     # UPI rotation: the per-application ("used") UPI is stored on this row only.
     # The account's DEFAULT UPI never changes from here — edit it in Accounts.

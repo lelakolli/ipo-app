@@ -905,7 +905,15 @@ function renderApps(){
   </div>`;
   document.querySelectorAll('#tab-apps tbody tr').forEach(tr=>{
     tr.querySelectorAll('input,select').forEach(inp=>{
-      inp.addEventListener('change',async()=>{await saveRow(tr);});
+      inp.addEventListener('change',async()=>{
+        // Allotment ↔ Refund are linked: mirror the partner dropdown live so the
+        // user SEES the consequence (server enforces the same rule too)
+        if(inp.classList.contains('f-allot')){
+          const rf=tr.querySelector('.f-refund');
+          if(inp.value==='allotted')rf.value='na';
+          else if(inp.value==='not_allotted'&&rf.value==='na')rf.value='pending';
+        }
+        await saveRow(tr);});
     });
   });
 }
