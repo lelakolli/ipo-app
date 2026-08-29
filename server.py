@@ -662,12 +662,12 @@ def _bigshare_captcha_result(ipo):
                     "Open the registrar page, check each PAN, then tap the Allotment cell of that row here.",
             "link": REGISTRAR_LINKS["Bigshare"], "matched_company": ipo.get("name", "")}
 
-def check_bigshare(ipo, acc):
+def check_bigshare(ipo, acc, force=False):
     """Return dict(status, allotted_qty, note, matched_company)."""
     if _bigshare_captcha_blocked(ipo.get("id")):
         return _bigshare_captcha_result(ipo)
     try:
-        comps = bigshare_companies()
+        comps = bigshare_companies(force=force)
     except Exception as e:
         _bigshare_captcha_blocked(ipo.get("id"), mark=True)
         print(f"[bigshare] page probe failed, treating as captcha-walled: {e}", flush=True)
@@ -747,7 +747,7 @@ def check_bigshare(ipo, acc):
     return {"status": "not_found", "note": "Empty record — likely not allotted", "matched_company": match["name"]}
 
 
-def check_kfintech(ipo, acc):
+def check_kfintech(ipo, acc, force=False):
     """KFin's ipostatus site (React SPA) calls an open AWS API-Gateway:
        GET .../api/query?type=pan|dpclid   headers: reqparam=<PAN|BOID>, client_id=<ipo id>
        200 -> [{Appln_No, Name, DP_CLID, Pan_No, App_Shares, All_Shares}, ...]
@@ -760,7 +760,7 @@ def check_kfintech(ipo, acc):
         return {"status": "manual", "note": "No PAN or CDSL BO ID stored for this account",
                 "link": REGISTRAR_LINKS["KFin"]}
     try:
-        comps = kfin_companies()
+        comps = kfin_companies(force=force)
     except Exception as e:
         return {"status": "manual", "note": f"KFin site unreachable ({e})", "link": REGISTRAR_LINKS["KFin"]}
 
@@ -862,7 +862,7 @@ def mufg_companies(force=False):
     return comps
 
 
-def check_linkintime(ipo, acc):
+def check_linkintime(ipo, acc, force=False):
     """MUFG Intime (prev Link Intime) — new portal does NOT block servers.
        Chain: POST GetDetails (company list) -> generateToken -> SearchOnPan
        {clientid, PAN, IFSC:'', CHKVAL:'1', token} ; response d = XML rows with
@@ -872,7 +872,7 @@ def check_linkintime(ipo, acc):
         return {"status": "manual", "note": "MUFG auto-check needs PAN (only BO ID stored) — use one-click link",
                 "link": REGISTRAR_LINKS["Link Intime"]}
     try:
-        comps = mufg_companies()
+        comps = mufg_companies(force=force)
     except Exception as e:
         return {"status": "manual", "note": f"MUFG portal unreachable ({e})", "link": REGISTRAR_LINKS["Link Intime"]}
     target = norm_name(ipo["name"])
@@ -2900,9 +2900,12 @@ def apply_bulk(iid: int, b: dict = Body(...)):
     return {"ok": True, "applied": n}
 
 
-def run_allotment_checks(ipo: dict) -> list:
+def run_allotment_checks(ipo: dict, force: bool = False) -> list:
     """Sweep every applied account through the registrar engine, commit verdicts,
-       and return per-account result dicts."""
+       and return per-account result dicts.
+       force=True (human tap) bypasses the 30-min company-list cache: on allotment
+       day the registrar page updates instantly, and a cached "not published yet"
+       list must never block a manual check. Background sweeps keep the cache."""
     engine = ENGINES.get(ipo["registrar"])
     apps = rows("""SELECT a.*, ac.holder, ac.pan, ac.cdsl FROM applications a
                    JOIN accounts ac ON ac.id=a.account_id
@@ -2913,7 +2916,7 @@ def run_allotment_checks(ipo: dict) -> list:
             res = {"status": "manual", "note": "Unknown registrar — check manually", "link": REGISTRAR_LINKS.get(ipo["registrar"], "")}
         else:
             try:
-                res = engine(ipo, a)
+                res = engine(ipo, a, force=force)
             except Exception as e:
                 res = {"status": "error", "note": str(e), "link": REGISTRAR_LINKS.get(ipo["registrar"], "")}
         # commit definitive outcomes
@@ -2957,7 +2960,7 @@ def check_allotment(iid: int):
     apps = rows("SELECT 1 x FROM applications WHERE ipo_id=? AND applied=1 LIMIT 1", (iid,))
     if not apps:
         raise HTTPException(400, "No applications recorded for this IPO yet")
-    results = run_allotment_checks(ipo)
+    results = run_allotment_checks(ipo, force=True)  # human tap — never serve a stale "not out yet"
     if results:
         backup_now()  # verdicts drive push alerts — never let a restart re-notify or roll them back
     try:
