@@ -1084,7 +1084,10 @@ function renderPnl(){
   const mAgg={};
   const addM=(m,b,c)=>{if(!m||!/^\d{4}-\d{2}$/.test(m))return;const o=mAgg[m]||(mAgg[m]={b:0,c:0});o.b+=b||0;o.c+=c||0;};
   apps.forEach(a=>{if(!(a.sell_qty>0))return;const ipo=ipoById(a.ipo_id)||{};
-    addM(((a.sold_on||ipo.listing_date||'')+'').slice(0,7),bookedPnl(a),0);});
+    // the user's mental model: "how did JULY's IPO batch do?" — book each IPO's
+    // profit into its listing month even if shares sold later (Indo-MIM listed
+    // Jul 30 but sold Aug 19 belongs to July). Charges keep their own month.
+    addM(((ipo.listing_date||a.sold_on||'')+'').slice(0,7),bookedPnl(a),0);});
   chargeItems.forEach(x=>addM(((x.date||'')+'').slice(0,7),0,+x.amount||0));
   const mKeys=Object.keys(mAgg).sort().reverse();
   const fyOf=m=>{const y=+m.slice(0,4),mm=+m.slice(5,7),s=mm>=4?y:y-1;return `FY ${s}-${String((s+1)%100).padStart(2,'0')}`;};
@@ -1106,7 +1109,7 @@ function renderPnl(){
     <div class="kpi"><div class="l">Unrealized P&L</div><div class="v ${pnlCls(tUnreal)}">${pnlTxt(tUnreal)}</div></div>
     <div class="kpi"><div class="l">Overall</div><div class="v ${pnlCls(tBook+tUnreal)}">${pnlTxt(tBook+tUnreal)}</div></div>
   </div>
-  <div class="card"><h3>📆 Profits — month to month & year to year <small>booked profit minus charges • undated sales count in their listing month</small></h3>
+  <div class="card"><h3>📆 Profits — month to month & year to year <small>booked profit counts in the IPO's <b>listing month</b> (sell later, still the IPO's month) • charges in their own month</small></h3>
   <div class="two">
     <div><div class="mut" style="font-size:12px;font-weight:700;margin-bottom:6px">MONTH TO MONTH</div>
       <div style="overflow:auto;max-height:340px"><table><thead><tr><th>Month</th><th>Booked</th><th>Charges</th><th>Net</th></tr></thead>
