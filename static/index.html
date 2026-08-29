@@ -875,6 +875,7 @@ function renderApps(){
   const uniqUpis=new Set(applied.map(x=>(x.upi||'').trim().toLowerCase()).filter(Boolean)).size;
   const blocked=applied.filter(a=>a.mandate_status==='approved'&&a.allotment!=='allotted'&&a.refund!=='received'&&!(a.sell_qty>0)).reduce((s,a)=>s+a.amount,0);
   const allot=applied.filter(a=>a.allotment==='allotted').length;
+  const stalePend=applied.filter(a=>a.allotment==='pending'&&(ipo.status==='listed'||ipo.status==='allotment_done'));
   const minAmt=ipo.price_max&&ipo.lot_size?ipo.price_max*ipo.lot_size:0;
   el.innerHTML=`
   <div class="toolbar">
@@ -891,6 +892,8 @@ function renderApps(){
     ${ipo.registrar_link?`<a class="btn ghost sm" href="${ipo.registrar_link}" target="_blank">🔗 Registrar page</a>`:''}
     <span class="mut">1 lot ≈ ${minAmt?rs(minAmt):'set price band + lot size'}</span>
   </div>
+  ${stalePend.length?`<div class="card" style="border-color:var(--amb);margin-bottom:10px;font-size:13.5px;line-height:1.6">⚠ <b>${stalePend.length} account${stalePend.length>1?'s':''}</b> still show allotment <b>pending</b> even though ${ipo.status==='listed'?'this IPO has listed':'allotment is done'} — every such row keeps its ₹ counted as <b>blocked</b> in the dashboard. If those accounts got NO shares:
+    <button class="btn sm warn" style="margin-left:6px" onclick="resolvePending()" title="Sets Allotment = Not allotted on every pending row and queues the refund (Refund = pending)">🧹 Mark ${stalePend.length} as Not allotted</button></div>`:''}
   <div id="checkres" class="checkres" style="display:none"></div>
   <div class="card">
     <h3>${esc(ipo.name)} <small>— ${applied.length}/${S.accounts.filter(a=>a.active).length} accounts applied • ${uniqUpis} UPI IDs used • blocked ${kr(blocked)} • ${allot} allotted${ipo.cmp?` • CMP ₹${num(ipo.cmp)}`:''} • changes auto-save</small></h3>
@@ -999,6 +1002,14 @@ window.unblockAllFunds=async()=>{
     if(!r.unblocked)toast('⚠ Server found nothing to unblock — the screen was stale; reloaded below.',1);
     else toast(`🔓 ${r.unblocked} fund${r.unblocked===1?'':'s'} unblocked ✓ — ${kr(amt)} released`);
   }finally{refreshHard(()=>!S.applications.some(x=>x.ipo_id===ipo.id&&x.applied&&x.refund==='pending'));}};
+window.resolvePending=async()=>{
+  const ipo=ipoById(selIpo);if(!ipo)return;
+  const stale=S.applications.filter(x=>x.ipo_id===ipo.id&&x.applied&&x.allotment==='pending');
+  if(!stale.length)return toast('Nothing pending for this IPO');
+  if(!confirm(`${stale.length} account(s) for ${ipo.name} will be marked NOT allotted.\n\nTap OK only if these accounts did NOT receive any shares.`))return;
+  const r=await api(`/api/ipos/${ipo.id}/resolve_pending_allotments`,'POST',{});
+  toast(`✅ ${r.updated} row(s) marked Not allotted — refund auto-queued; tap 🔓 All funds unblocked when money returns`);
+  refreshHard(()=>!S.applications.some(x=>x.ipo_id===ipo.id&&x.applied&&x.allotment==='pending'));};
 window.checkOne=async(accId)=>{
   const ap=appFor(selIpo,accId);
   const body={ipo_id:selIpo,account_id:accId,category:'Retail'};

@@ -272,18 +272,24 @@ def _github_fetch():
     # newest writes live on the data-backup branch; backups written by older
     # app versions only ever existed on main — read branch first, fall back so
     # nothing gets stranded
+    best = None
     for params in ({"ref": _GH_BRANCH}, {}):
+        # the branch is where new writes go, but a freshly-created branch can
+        # momentarily hold an OLDER copy than main — always compare exported_at
+        # and restore the newest valid payload
         try:
             r = requests.get(api, headers=_gh_headers(), params=params, timeout=15)
-            if r.status_code == 200:
-                d = json.loads(base64.b64decode(r.json()["content"]).decode())
-                if isinstance(d, dict) and d.get("tables"):
-                    return d
+            if r.status_code != 200:
+                continue
+            d = json.loads(base64.b64decode(r.json()["content"]).decode())
+            if not (isinstance(d, dict) and d.get("tables")):
                 print(f"[backup] payload on ref {params.get('ref', 'main')} is not a backup — trying next", flush=True)
+                continue
+            if best is None or str(d.get("exported_at", "")) > str(best.get("exported_at", "")):
+                best = d
         except Exception as e:
             print("[backup] GitHub fetch failed:", e, flush=True)
-            return None
-    return None
+    return best
 
 
 def _do_backup():
@@ -2590,6 +2596,33 @@ def unblock_all_funds(iid: int):
         # done, table/dashboard reverted to the older backup on restart).
         backup_now()
     return {"ok": True, "unblocked": n}
+
+
+@app.post("/api/ipos/{iid}/resolve_pending_allotments")
+def resolve_pending_allotments(iid: int):
+    """IPO decided (listed or allotment done) but some rows still say
+    'pending'? Each stale row keeps its amount counted as blocked forever and
+    the table never looks finished. One tap marks every undecided applied row
+    NOT allotted and queues its refund — only rows that genuinely got no
+    shares should be swept (the button tells the user so)."""
+    ipo_l = rows("SELECT * FROM ipos WHERE id=?", (iid,))
+    if not ipo_l:
+        raise HTTPException(404, "ipo not found")
+    st = ipo_status(ipo_l[0])
+    if st not in ("listed", "allotment_done"):
+        raise HTTPException(400, f"still in '{st}' — clean pending rows only after the result/listing is out")
+    with LOCK, get_db() as con:
+        cur = con.execute(
+            """UPDATE applications SET allotment='not_allotted', allotted_qty=0,
+               refund=CASE WHEN refund='na' THEN 'pending' ELSE refund END,
+               checked_note='pending cleared: marked not allotted after result (cleanup)',
+               updated_at=datetime('now','localtime')
+               WHERE ipo_id=? AND applied=1 AND allotment='pending'""", (iid,))
+        con.commit()
+        n = cur.rowcount
+    if n:
+        backup_now()  # verdict-class write — never let a hard-kill roll it back
+    return {"ok": True, "updated": n, "ipo_status": st}
 
 
 @app.post("/api/ipos/{iid}/sold_all")
