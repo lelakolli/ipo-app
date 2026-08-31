@@ -1284,7 +1284,60 @@ def refresh_gmp():
     return {"ok": True, "matched": matched, "total": len(scraped)}
 
 
-def yahoo_price(symbol):
+# --- batch #11: GMP must feel live -----------------------------------------
+# The free host sleeps whenever nobody is looking at the app, so the 15-min
+# scheduler effectively only runs while (and shortly after) someone uses it.
+# Result the user saw: stale GMP on screen mornings/odd hours, while the same
+# number on the internet had moved on. Fix is event-driven: every /api/state
+# call measures how old our newest GMP evidence is; older than 12 min -> kick
+# a background sweep (throttled to one per 10 min) so whoever OPENS the app is
+# looking at numbers minutes-old — not at the mercy of the wall clock.
+_GMP_KICK = {"at": 0.0}
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _ist_age_seconds(ts) -> float:
+    try:
+        t = datetime.fromisoformat(str(ts).strip())
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=_IST)
+        return (datetime.now(_IST) - t).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")  # unparsable/missing -> treat as ancient
+
+
+def kick_gmp_refresh(reason="open") -> bool:
+    """Spawn a throttled background GMP sweep (IPO Ji cross-check + ARTHAN
+    boards). Returns True when a sweep was actually started."""
+    now = time.time()
+    if now - _GMP_KICK["at"] < 600:
+        return False
+    _GMP_KICK["at"] = now
+
+    def _bg():
+        try:
+            print(f"[gmp kick:{reason}] ipoji:", refresh_gmp(), flush=True)
+            res = arthan.refresh_market()
+            print(f"[gmp kick:{reason}] arthan:",
+                  {k: res.get(k) for k in ("ok", "matched", "verified")}, flush=True)
+        except Exception as e:
+            print(f"[gmp kick:{reason}] error:", e, flush=True)
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return True
+
+
+def gmp_evidence_stale(ipos) -> bool:
+    """True when the youngest GMP timestamp we hold (per-IPO mkt stamp, or the
+    ARTHAN engine's own last-refresh kv) is older than ~12 minutes — i.e. a
+    human looking now is likely reading last-hour's internet."""
+    stamps = [i.get("mkt_at") or "" for i in ipos]
+    try:
+        stamps.append(json.loads(kv_get("arthan_last", "{}") or "{}").get("at", ""))
+    except (TypeError, ValueError):
+        pass
+    newest = max((s for s in stamps if s), default="")
+    return not newest or _ist_age_seconds(newest) > 12 * 60
     r = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.NS"
                      if not symbol.endswith((".NS", ".BO")) else
                      f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
@@ -2608,8 +2661,16 @@ def state():
         _charges_month_roll()  # keep recurring monthly charges current
     except Exception as e:
         print("[charges] roll failed:", e, flush=True)
+    # batch #11: opening the app on a slept-then-woke host must re-read the
+    # internet — fire the background sweep when our GMP evidence is >12 min old
+    try:
+        if gmp_evidence_stale(ipos):
+            kick_gmp_refresh("app open")
+    except Exception as e:
+        print("[gmp kick] freshness check failed:", e, flush=True)
     return {
         "accounts": rows("SELECT * FROM accounts ORDER BY sort, holder, id"),
+        "gmp_age_s": min((_ist_age_seconds(i.get("mkt_at") or "") for i in ipos if i.get("mkt_at")), default=None),
         "ipos": ipos,
         "applications": rows("SELECT * FROM applications"),
         "charges": charges_store(),
@@ -3321,7 +3382,19 @@ def api_market_verify():
 
 @app.post("/api/gmp/refresh")
 def api_gmp_refresh():
-    return refresh_gmp()
+    """IPO-section 💹 button (batch #11): refresh BOTH GMP columns in one tap —
+    the ARTHAN engine (owns the displayed value) AND the IPO Ji cross-check
+    feed. ARTHAN double-samples with gap=6 like the Market-tab button, so the
+    request stays under the host time limit."""
+    mkt = {}
+    try:
+        mkt = arthan.refresh_market(force=True, gap=6)
+    except Exception as e:
+        mkt = {"ok": False, "matched": 0, "verified": 0, "errors": [f"market engine: {e}"]}
+    out = refresh_gmp()
+    out["market"] = {"ok": bool(mkt.get("ok")), "matched": mkt.get("matched", 0),
+                     "verified": mkt.get("verified", 0), "errors": mkt.get("errors", [])[:3]}
+    return out
 
 
 @app.post("/api/ipos/{iid}/fetch_cmp")

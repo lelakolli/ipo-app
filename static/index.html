@@ -120,6 +120,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc);cursor:point
 .btn.danger{background:transparent;border:1px solid rgba(248,113,113,.55);color:var(--red);box-shadow:none}
 .btn.danger:hover{background:rgba(248,113,113,.08)}
 .chip{display:inline-block;padding:3.5px 11px;border-radius:999px;font-size:11px;font-weight:750;letter-spacing:.45px;white-space:nowrap}
+.chip.gmp-stale{box-shadow:0 0 0 1.5px var(--gold)}
 .c-open{background:#0d3a30;color:#5eead4}
 .c-upcoming{background:#1a2b45;color:#93c5fd}
 .c-result_pending{background:#3d2f10;color:#fcd34d}
@@ -328,6 +329,13 @@ async function refresh(){S=await api('/api/state');
 const refreshHard=(check)=>refresh().then(()=>{
   if(check&&!check())toast('⚠ Server did not keep that change — tap it again; if it repeats, tell me.',1);
 }).catch(()=>toast('Saved on server ✓ — but screen reload failed. Close & reopen to see the latest.',1));
+// batch #11 GMP freshness badges: show how old the displayed GMP's internet
+// timestamp is, gold-outline the chip once it crosses an hour.
+const gmpAge=ts=>{const t=new Date(ts);if(isNaN(t))return'';
+  const m=Math.max(0,Math.floor((Date.now()-t.getTime())/60000));
+  return m<1?'just now':(m<60?m+'m':(m<1440?Math.floor(m/60)+'h':Math.floor(m/1440)+'d'));};
+const gmpStale=i=>{if(!i.mkt||!i.mkt.updated_at)return false;
+  const t=new Date(i.mkt.updated_at);return !isNaN(t)&&(Date.now()-t.getTime()>60*60000);};
 
 // ---------- tabs ----------
 document.querySelectorAll('nav button[data-tab]').forEach(b=>b.onclick=()=>{curTab=b.dataset.tab;
@@ -668,7 +676,7 @@ function renderIpos(){
     <div class="mut" style="font-size:12px;margin-top:4px">${fd(i.open_date)} → ${fd(i.close_date)} • Allot ${fd(i.allotment_date)} • List ${fd(i.listing_date)}${i.board==='SME'?' • <b>SME</b>':''}</div>
     <div style="font-size:13px;margin-top:5px">${i.price_max?`₹${num(i.price_min)}–₹${num(i.price_max)} &nbsp;•&nbsp; lot ${num(i.lot_size)} &nbsp;•&nbsp; min ${rs(minAmt)}`:'<span class="mut">price band not set — Edit IPO</span>'}</div>
     <div style="margin-top:7px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-      ${i.gmp?`<span class="chip c-listed" title="Grey market premium — ${i.mkt?stateTxt(i.mkt.gmp_state):''}">${i.mkt?stateDot(i.mkt.gmp_state):''} GMP ₹${num(i.gmp)}</span>`:''}
+      ${i.gmp?`<span class="chip c-listed${gmpStale(i)?' gmp-stale':''}" title="Grey market premium — ${i.mkt?stateTxt(i.mkt.gmp_state)+' • ':''}${i.mkt&&i.mkt.updated_at?`internet value as of ${new Date(i.mkt.updated_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})} IST${gmpStale(i)?' — over an hour old, tap 💹 Refresh GMP to force now':''}`:'no live timestamp — tap 💹 Refresh GMP'}">${i.mkt?stateDot(i.mkt.gmp_state):''} GMP ₹${num(i.gmp)}${i.mkt&&i.mkt.updated_at?` <span style="opacity:.78;font-size:10.5px">· ${gmpAge(i.mkt.updated_at)}</span>`:''}</span>`:''}
       ${i.mkt&&i.mkt.est_listing&&i.status!=='listed'?`<span class="chip" title="Expected listing price (GMP estimate)">→ ₹${num(i.mkt.est_listing)}${i.mkt.est_pct!=null?` (${i.mkt.est_pct>0?'+':''}${num(i.mkt.est_pct)}%)`:''}</span>`:''}
       ${s.total!=null?`<span class="chip" title="Total times subscribed">SUB <b>${s.total}×</b></span>`:''}
       ${i.cmp?`<span class="chip" title="Current market price">CMP ₹${num(i.cmp)}</span>`:''}
@@ -699,7 +707,7 @@ function renderIpos(){
     <button class="btn" onclick="ipoModal()">+ Add IPO</button>
     <button class="btn ghost" id="syncbtn" onclick="syncLive()">🔄 Sync live IPO list</button>
     <button class="btn ghost" id="gmpbtn" onclick="refreshGmp()">💹 Refresh GMP</button>
-    <span class="mut">GMP + subscription auto-refresh every 15 min (Chittorgarh + IPO Ji). CMP auto-fetches from listing day onwards. Settled IPOs auto-move to Archive after 10 days.</span>
+    <span class="mut">GMP re-reads the internet ~every 15 min while the app is open — AND within a minute of you opening it (free host sleeps when idle). Chips show the age (· 25m); gold outline = over an hour old, tap 💹 to force now. CMP auto-fetches from listing day onwards. Settled IPOs auto-move to Archive after 10 days.</span>
   </div>
   <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap" role="tablist" aria-label="IPO view">
     ${vbtn('open')}${vbtn('upcoming')}${vbtn('closed')}
@@ -717,7 +725,7 @@ window.syncLive=async()=>{const b=document.getElementById('syncbtn');b.disabled=
 window.refreshGmp=async()=>{const b=document.getElementById('gmpbtn');b.disabled=true;b.textContent='Updating…';
   try{const r=await api('/api/gmp/refresh','POST');
     if(r.ok===false)toast('GMP refresh failed: '+(r.error||''),1);
-    else toast(`GMP updated for ${r.matched} IPO(s) (${r.total} live quotes scanned)`);}catch(e){}
+    else{const mk=r.market||{};toast(`GMP updated: ${mk.verified||0} verified on the live board${r.matched?` • ${r.matched} cross-checked`:''}${mk.errors&&mk.errors.length?' • a source was unreachable (kept previous values)':''}`);}}catch(e){}
   b.disabled=false;b.textContent='💹 Refresh GMP';refresh();};
 window.fetchCmp=async(id)=>{try{const r=await api(`/api/ipos/${id}/fetch_cmp`,'POST');
     toast(`CMP ₹${r.cmp} (${r.symbol}) • ${r.chg_pct>0?'+':''}${r.chg_pct}% vs issue`);refresh();}
@@ -1256,6 +1264,22 @@ const heartbeat=()=>{if(document.visibilityState!=='visible')return;
   fetch('/api/ping',{method:'POST'}).then(r=>{if(r.status===401)location.href='/';}).catch(()=>{});};
 setInterval(heartbeat,3*60*1000);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){heartbeat();loadAlerts();}});
+// batch #11: numbers on screen must follow the internet WITHOUT manual taps —
+// refetch state once a minute while the app is visible (the server kicks a
+// real GMP sweep whenever its evidence is >12 min old), and the moment you
+// return. NEVER while you're typing or a modal is open, and pause 15 s after
+// your last keystroke — an auto render must not eat half-typed edits.
+let _lastAuto=0,_lastEdit=0;
+document.addEventListener('input',()=>{_lastEdit=Date.now();},true);
+const autoState=()=>{if(document.visibilityState!=='visible')return;
+  if(document.getElementById('modal-bg').classList.contains('show'))return;
+  const ae=document.activeElement;
+  if(ae&&['INPUT','SELECT','TEXTAREA'].includes(ae.tagName))return;
+  if(Date.now()-_lastEdit<15000)return;
+  _lastAuto=Date.now();
+  refresh().catch(()=>{});};
+setInterval(()=>{if(Date.now()-_lastAuto>55*1000)autoState();},60000);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&Date.now()-_lastAuto>30*1000)autoState();});
 
 // ---------- modal ----------
 function openModal(html){document.getElementById('modal').innerHTML=html;
