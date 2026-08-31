@@ -1664,6 +1664,16 @@ async def passcode_gate(request, call_next):
         if p.startswith("/bs/p/"):
             return JSONResponse({"ok": False, "error": "locked"}, status_code=401)
         return HTMLResponse(UNLOCK_HTML)
+    if p.startswith("/assist/"):
+        # assisted KFin/MUFG one-tap pages hold PANs + verdict controls too —
+        # exact same session wall as /bs/ (their /api/assist/query data call is
+        # already covered by the "/api" branch below)
+        if _authed(request):
+            return await call_next(request)
+        if request.cookies.get("ipo_auth") and _cookie_brake(_client_ip(request)):
+            return JSONResponse({"ok": False, "error": "too many tries — wait 10 minutes"},
+                                status_code=429)
+        return HTMLResponse(UNLOCK_HTML)
     if p == "/" or p.startswith("/api"):
         if _authed(request):
             resp = await call_next(request)
@@ -1963,6 +1973,220 @@ async def bs_proxy(upath: str, request: Request):
         resp.headers["retry-after"] = r.headers["retry-after"]
     _bs_set_cookies(resp, r)
     return resp
+
+
+# ----------------------------------------------------------------------------
+# Assisted ONE-TAP allotment check for KFin + MUFG (Link Intime).
+# These registrars do NOT gate searches behind a captcha, so instead of
+# proxying their sites (React SPA / ASP.NET webservices — fragile in an iframe)
+# we run that single account's query server-side with the same engines the
+# auto-check uses, force-fresh, and show the registrar's OWN answer on a clean
+# app page. The human reads the live record once and files the verdict with a
+# single tap — the identical save path as the Bigshare assisted flow
+# (/api/applications → batch-#6 refund invariants kick in automatically).
+# Auto-check stays untouched; this exists for "let me confirm it myself"
+# moments and for rows the sweep flags manual/error.
+# ----------------------------------------------------------------------------
+_ASSIST_REGS = {
+    "kfin":        {"label": "KFin",               "engine": "KFin",
+                    "link": REGISTRAR_LINKS["KFin"]},
+    "link intime": {"label": "MUFG (Link Intime)", "engine": "Link Intime",
+                    "link": REGISTRAR_LINKS["Link Intime"]},
+    "mufg":        {"label": "MUFG (Link Intime)", "engine": "Link Intime",
+                    "link": REGISTRAR_LINKS["Link Intime"]},
+}
+_ASSIST_FORCE_AT = {}   # ipo id -> epoch of last forced company-list refresh
+
+
+def _assist_meta(ipo: dict):
+    return _ASSIST_REGS.get((ipo.get("registrar") or "").strip().lower())
+
+
+@app.get("/api/assist/query")
+def assist_query(ipo: int = 0, acc: int = 0):
+    """Run the registrar engine for ONE account, force-fresh company list, and
+    return the raw verdict the assisted page renders. Writes nothing — the
+    human still taps to save, exactly like the Bigshare captcha flow."""
+    ipo_r = rows("SELECT * FROM ipos WHERE id=?", (ipo,))
+    acc_r = rows("SELECT * FROM accounts WHERE id=?", (acc,))
+    if not ipo_r or not acc_r:
+        raise HTTPException(404, "unknown ipo/account")
+    i, meta_acc = ipo_r[0], acc_r[0]
+    meta = _assist_meta(i)
+    if not meta:
+        raise HTTPException(400, "no assisted engine for this registrar")
+    # On allotment day a stale "not published yet" company list is worthless, so
+    # manual taps always WANT force=True — but the human hops through 15
+    # accounts in a row, and force=True re-scrapes the company source every
+    # time. Cap the heavy refresh at one per IPO per 2 minutes.
+    last = _ASSIST_FORCE_AT.get(str(ipo), 0.0)
+    force = (time.time() - last) > 120
+    if force:
+        _ASSIST_FORCE_AT[str(ipo)] = time.time()
+    try:
+        res = ENGINES[meta["engine"]](i, meta_acc, force=force)
+    except Exception as e:
+        print(f"[assist] engine crashed for ipo={ipo} acc={acc}: {e}", flush=True)
+        res = {"status": "error", "note": f"{meta['label']} check failed ({e})",
+               "link": meta["link"]}
+    res = dict(res or {})
+    res.setdefault("link", meta["link"])
+    res["registrar"] = meta["label"]
+    return res
+
+
+_ASSIST_PAGE = """<!doctype html>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Assisted check — __REG__</title>
+<body style="margin:0;background:#070d14;color:#e9eff6;font:15px/1.55 system-ui,sans-serif">
+<div style="max-width:640px;margin:0 auto;padding:18px 14px 40px">
+  <div style="color:#14b8a6;font-weight:700;letter-spacing:.4px;text-transform:uppercase;font-size:12px">__REG__ assisted check · one tap</div>
+  <h2 style="margin:6px 0 14px">__IPO__</h2>
+  <div style="background:#0f1824;border:1px solid #223247;border-radius:14px;padding:13px 15px;margin-bottom:12px">
+    <div style="display:flex;justify-content:space-between;gap:10px"><span style="color:#8fa3b8">Account</span><b>__ACC__</b></div>
+    <div style="display:flex;justify-content:space-between;gap:10px;margin-top:5px"><span style="color:#8fa3b8">PAN</span><b>__PAN__</b></div>
+  </div>
+  <div id="res" style="background:#0f1824;border:1px solid #223247;border-radius:14px;padding:16px 15px;margin-bottom:12px;color:#8fa3b8">
+    ⏳ Reading the live record from __REG__… (a few seconds)
+  </div>
+  <div id="acts" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
+  <div style="background:#0f1824;border:1px solid #223247;border-radius:14px;padding:13px 15px">
+    <div style="color:#8fa3b8;font-size:13px;margin-bottom:8px">Accounts applied to this IPO — hop to the next one without going back:
+      <span id="nextlink"></span></div>
+    <div id="chips" style="display:flex;gap:7px;flex-wrap:wrap">__CHIPS__</div>
+  </div>
+  <div style="margin-top:16px;font-size:13px;color:#8fa3b8">
+    Doubt the answer? <a href="__REG_LINK__" target="_blank" rel="noopener" style="color:#2dd4bf">Open the __REG__ site yourself ↗</a>
+  </div>
+</div>
+<script>
+var F=__FILL__;
+function esc(s){var d=document.createElement('div');d.textContent=String(s==null?'':s);return d.innerHTML;}
+function render(d){
+  var res=document.getElementById('res'),acts=document.getElementById('acts');
+  var qty=+d.allotted_qty||0;
+  var head='',cls='#223247';
+  acts.innerHTML='';
+  if(d.status==='ok'){
+    cls='#1d7a4f';res.style.borderColor=cls;
+    head='<div style="font-size:20px;font-weight:800;color:#6ee7b7">\\u2705 ALLOTTED '+(qty?qty+' shares':'')+'</div>';
+    acts.appendChild(mkBtn('\\u2705 Save ALLOTTED'+(qty?' '+qty+' sh':''),function(){save(true,qty)},false));
+  }else if(d.status==='not_found'){
+    cls='#a33';res.style.borderColor=cls;
+    head='<div style="font-size:20px;font-weight:800;color:#f87171">\\u274C NOT allotted</div>';
+    acts.appendChild(mkBtn('\\u274C Save NOT allotted',function(){save(false,0)},true));
+  }else{
+    cls='#8a6d1d';res.style.borderColor=cls;
+    head='<div style="font-size:20px;font-weight:800;color:#fbbf24">\\ud83d\\udd90 Needs your eyes</div>'+
+         '<div style="color:#8fa3b8;margin-top:6px">'+esc(d.note||'The registrar did not give a clear answer.')+'</div>'+
+         '<div style="color:#8fa3b8;margin-top:6px">Check it once on the manual site link below if you like, then file it:</div>';
+    acts.appendChild(mkBtn('\\u2705 Mark ALLOTTED',function(){save(true,0)},false));
+    acts.appendChild(mkBtn('\\u274C Mark NOT allotted',function(){save(false,0)},true));
+  }
+  res.innerHTML=head+
+    (d.status!=='manual'&&d.status!=='error'&&d.note?'<div style="color:#8fa3b8;margin-top:6px">'+esc(d.note)+'</div>':'')+
+    (d.matched_company?'<div style="color:#5f7488;margin-top:6px;font-size:13px">registrar list: '+esc(d.matched_company)+'</div>':'');
+}
+function mkBtn(label,fn,bad){
+  var b=document.createElement('button');
+  b.textContent=label;
+  b.style.cssText='flex:1;min-width:150px;border:0;border-radius:10px;padding:13px 10px;font-weight:800;font-size:14px;cursor:pointer;'+
+    (bad?'background:#f87171;color:#1d0505':'background:#14b8a6;color:#04110d');
+  b.onclick=function(){b.disabled=true;fn();};
+  return b;
+}
+function save(allotted,qty){
+  if(allotted){
+    qty=parseInt(prompt('How many shares were allotted? (number in the result)',String(qty||F.lotSize||0))||'0',10);
+    if(!qty||qty<1){alert('Cancelled — no share count entered. Nothing was saved.');document.getElementById('acts').innerHTML='';render({status:'manual',note:'Save cancelled — pick the verdict again when ready.'});return;}
+  }
+  var res=document.getElementById('res');
+  res.innerHTML='\\u23F3 Saving verdict to the app\\u2026';
+  fetch('/api/applications',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ipo_id:F.ipoId,account_id:F.accId,applied:1,
+      allotment:allotted?'allotted':'not_allotted',allotted_qty:allotted?qty:0})})
+  .then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();})
+  .then(function(){
+    res.style.borderColor='#1d7a4f';
+    res.innerHTML='\\u2705 Saved: <b>'+esc(F.accName)+'</b> = '+(allotted?('ALLOTTED '+qty+' sh'):'NOT allotted \\u2014 refund auto-queued')+'.';
+    var chip=document.getElementById('chip-'+F.accId);if(chip){chip.style.background='#14b8a6';chip.style.color='#04110d';}
+    var nxt=F.nextAcc?document.getElementById('chip-'+F.nextAcc):null;
+    var nl=document.getElementById('nextlink');
+    if(nxt&&N_ACC){nl.innerHTML='Next up: <b>'+esc(N_ACC)+'</b> \\u2192';nxt.style.boxShadow='0 0 0 2px #fbbf24';}
+    else{nl.innerHTML='That was the last pending account — you\\u2019re done here. \\u2705';}
+  })
+  .catch(function(){res.innerHTML='\\u26A0 Save failed (session expired?) \\u2014 note the verdict and mark this row in the app yourself.';});
+}
+var N_ACC=__NEXT_NAME__;
+fetch('/api/assist/query?ipo='+F.ipoId+'&acc='+F.accId)
+  .then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();})
+  .then(function(d){render(d);})
+  .catch(function(e){render({status:'error',note:'Could not reach the check ('+e.message+'). Use the manual site link below.'});});
+</script>
+"""
+
+
+@app.get("/assist/open")
+def assist_open(ipo: int = 0, acc: int = 0):
+    ipo_r = rows("SELECT * FROM ipos WHERE id=?", (ipo,))
+    acc_r = rows("SELECT * FROM accounts WHERE id=?", (acc,))
+    if not ipo_r or not acc_r:
+        raise HTTPException(404, "unknown ipo/account")
+    i, a = ipo_r[0], acc_r[0]
+    meta = _assist_meta(i)
+    if not meta:
+        reg = (i.get("registrar") or "").strip()
+        if reg.lower() == "bigshare":
+            raise HTTPException(400, "Bigshare IPOs use their own assisted page — tap the 🔗 name in the Applications table (it opens /bs/open).")
+        raise HTTPException(400, f"No assisted one-tap check for registrar '{reg or 'unknown'}' — use the registrar link on the IPO.")
+
+    # account chips: everyone who applied to this IPO (mirrors the Applications
+    # table roster), so the user can hop through the whole family list without
+    # going back after every verdict
+    accs = rows("SELECT id, holder, active FROM accounts ORDER BY sort, id")
+    apps = rows("SELECT account_id, applied, allotment FROM applications WHERE ipo_id=?", (ipo,))
+    amap = {x["account_id"]: x for x in apps}
+    chips, applied_ids = [], []
+    for x in accs:
+        ap = amap.get(x["id"])
+        if not (x["active"] or ap):
+            continue
+        if not ap or not ap["applied"]:
+            continue
+        applied_ids.append(x["id"])
+        icon = "✅" if ap["allotment"] == "allotted" else ("❌" if ap["allotment"] == "not_allotted" else "⏳")
+        cur = (x["id"] == acc)
+        style = ("background:#0e2f28;color:#6ee7b7;border-color:#14b8a6;font-weight:800" if cur
+                 else "background:#131f30;color:#c8d6e5;border-color:#223247")
+        chips.append(
+            f'<a id="chip-{x["id"]}" href="/assist/open?ipo={ipo}&acc={x["id"]}" '
+            f'style="border:1px solid;border-radius:20px;padding:7px 13px;text-decoration:none;font-size:13px;{style}">'
+            f'{icon} {_bs_esc(x["holder"])}</a>')
+    next_acc = None
+    pending_ids = [aid for aid in applied_ids
+                   if (amap[aid]["allotment"] or "pending") == "pending" and aid != acc]
+    if acc in applied_ids:
+        ordered = applied_ids[applied_ids.index(acc) + 1:] + applied_ids[:applied_ids.index(acc)]
+        next_acc = next((aid for aid in ordered if aid in pending_ids), None)
+    if next_acc is None:
+        next_acc = next((aid for aid in pending_ids), None) if pending_ids else None
+    next_name = next((x["holder"] for x in accs if x["id"] == next_acc), "")
+
+    fill = {"ipoId": i["id"], "accId": a["id"], "ipoName": i["name"],
+            "accName": a.get("holder", ""), "lotSize": i.get("lot_size") or 0,
+            "pan": (a.get("pan") or "").strip().upper(), "nextAcc": next_acc}
+    fill_js = json.dumps(fill).replace("</", "<\\/")
+    page = (_ASSIST_PAGE
+            .replace("__REG__", _bs_esc(meta["label"]))
+            .replace("__IPO__", _bs_esc(i["name"]))
+            .replace("__ACC__", _bs_esc(a.get("holder", "")))
+            .replace("__PAN__", _bs_esc(fill["pan"] or "— (no PAN stored)"))
+            .replace("__CHIPS__", "".join(chips) or '<span style="color:#8fa3b8">Nobody has an applied row on this IPO yet.</span>')
+            .replace("__REG_LINK__", _bs_esc(meta["link"]))
+            .replace("__FILL__", fill_js)
+            .replace("__NEXT_NAME__", json.dumps(next_name).replace("</", "<\\/")))
+    print(f"[assist] opened for ipo={ipo} acc={acc} reg={meta['label']}", flush=True)
+    return HTMLResponse(page)
 
 
 @app.post("/api/unlock")

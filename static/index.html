@@ -823,8 +823,9 @@ function renderApps(){
   const ipo=selIpo?ipoById(selIpo):null;
   if(!ipo){el.innerHTML='<div class="card mut">Add an IPO first (IPOs tab).</div>';return;}
   const accts=S.accounts.filter(a=>a.active||appFor(ipo.id,a.id));
-  const bsLink=(ipo.registrar||'').toLowerCase()==='bigshare'&&ipo.status!=='listed';
-  const accName=a=>bsLink?`<a href="/bs/open?ipo=${ipo.id}&acc=${a.id}" target="_blank" rel="noopener" title="Opens the real Bigshare page through the app — company + PAN pre-filled; you only read the captcha and tap SEARCH" style="color:var(--acc2);text-decoration:none;font-weight:700">${esc(a.holder)} 🔗</a>`:`<b>${esc(a.holder)}</b>`;
+  const regLow=(ipo.registrar||'').toLowerCase();
+  const assistPre=ipo.status==='listed'?null:(regLow==='bigshare'?'/bs/open':((regLow==='kfin'||regLow==='link intime'||regLow==='mufg')?'/assist/open':null));
+  const accName=a=>assistPre?(assistPre==='/bs/open'?`<a href="${assistPre}?ipo=${ipo.id}&acc=${a.id}" target="_blank" rel="noopener" title="Opens the real Bigshare page through the app — company + PAN pre-filled; you only read the captcha and tap SEARCH" style="color:var(--acc2);text-decoration:none;font-weight:700">${esc(a.holder)} 🔗</a>`:`<a href="${assistPre}?ipo=${ipo.id}&acc=${a.id}" target="_blank" rel="noopener" title="One-tap assisted check — the app reads the live ${esc(ipo.registrar)} record for this account; you see the result and file the verdict back with one tap" style="color:var(--acc2);text-decoration:none;font-weight:700">${esc(a.holder)} 🔗</a>`):`<b>${esc(a.holder)}</b>`;
   const rowsHtml=accts.map(a=>{
     const ap=appFor(ipo.id,a.id)||{applied:0,lots:1,amount:0,upi:a.upi,mandate_status:'pending',allotment:'pending',allotted_qty:0,refund:'na',sell_qty:0,sell_price:0,sold_on:'',app_no:''};
     const dis=ap.applied?'':'disabled';
@@ -1057,10 +1058,12 @@ window.runAllotmentCheck=async()=>{
         3️⃣ Back here: tap that row's <b>Allotment</b> cell; tap <b>🔓 All funds unblocked</b> when money returns
       </div>
       <div>${r.results.map(x=>`<a class="btn sm" style="margin:2px 5px 2px 0" href="/bs/open?ipo=${ipo.id}&acc=${x.account_id}" target="_blank" rel="noopener">🔗 ${esc(x.holder)}</a>`).join('')}</div></div>`:'';
+    const rgLow=(ipo.registrar||'').toLowerCase();
+    const assRow=ipo.status==='listed'?null:((rgLow==='kfin'||rgLow==='link intime'||rgLow==='mufg')?`/assist/open?ipo=${ipo.id}&acc=`:null);
     box.innerHTML=capCard+r.results.map(x=>{
       const col=x.status==='ok'?'var(--grn)':(x.status==='not_found'||x.status==='captcha'?'var(--amb)':'var(--mut)');
       const lbl=x.status==='ok'?`✅ Allotted ${x.allotted_qty||''} sh`:(x.status==='not_found'?'❌ No allotment record':(x.status==='captcha'?'🧩 Verify manually (captcha)':(x.status==='manual'?'🖐 Check manually':'⚠ '+x.status)));
-      return `<div><b>${esc(x.holder)}</b> — <span style="color:${col};font-weight:650">${lbl}</span>
+      return `<div><b>${esc(x.holder)}</b>${assRow?` <a class="btn sm ghost" style="padding:1px 8px;font-size:11px" href="${assRow}${x.account_id}" target="_blank" rel="noopener" title="One-tap assisted check for this account — see the live registrar record and file the verdict back">🔗 assisted</a>`:''} — <span style="color:${col};font-weight:650">${lbl}</span>
         ${x.note?`<br><span class="mut">${esc(x.note)}</span>`:''}
         ${x.matched_company?`<br><span class="mut">matched: ${esc(x.matched_company)}</span>`:''}
         ${x.link?`<br><a href="${esc(x.link)}" target="_blank" rel="noopener">Open registrar →</a>`:''}</div>`;}).join('');
