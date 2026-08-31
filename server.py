@@ -1832,8 +1832,40 @@ bar((okCo?'\\u2705 <b>'+co+'</b> selected':'\\u26A0 Company not in the list yet 
 +'<br>'+(f2?f2+' for <b>'+(F.accName||'')+'</b>.':'No PAN/BO ID stored for <b>'+(F.accName||'')+'</b> \\u2014 type it yourself.')
 +'<br>Now just read the captcha picture and tap <b>SEARCH</b>.');
 var cap=document.getElementById('captcha-input');
-if(cap){setTimeout(function(){try{cap.scrollIntoView({block:'center'});cap.focus();}catch(e){}},700);}}
+if(cap){setTimeout(function(){try{cap.scrollIntoView({block:'center'});cap.focus();}catch(e){}},700);}
+// once a result (or the "No Record" popup) is on screen, offer the one-tap verdict
+var poll=setInterval(function(){
+var dp=document.getElementById('dPrint');
+var shown=dp&&dp.offsetHeight>0&&dp.offsetParent!==null;
+var noRec=/No Record Found/i.test(document.body.innerText||'');
+if(shown||noRec){clearInterval(poll);offerVerdict();}
+},800);
+setTimeout(function(){clearInterval(poll);},180000);}
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',go);}else{go();}
+function offerVerdict(){
+var d=document.getElementById('ipoassistbar');if(!d)return;
+if(document.getElementById('ipoassist-mark'))return;
+var w=document.createElement('div');w.id='ipoassist-mark';
+w.style.cssText='margin-top:9px;display:flex;gap:6px;flex-wrap:wrap';
+bar('Result is on screen \u2014 send it back with ONE tap:');
+var a=document.createElement('button');a.textContent='\u2705 Mark ALLOTTED';
+var n=document.createElement('button');n.textContent='\u274C Mark NOT allotted';
+[a,n].forEach(function(b){b.style.cssText='flex:1;min-width:130px;background:#14b8a6;color:#04110d;border:0;border-radius:9px;padding:10px;font-weight:700;font-size:13px;cursor:pointer'});
+n.style.background='#f87171';n.style.color='#1d0505';
+a.onclick=function(){saveVerdict(true)};n.onclick=function(){saveVerdict(false)};
+w.appendChild(a);w.appendChild(n);d.appendChild(w);}
+function saveVerdict(allotted){
+var qty=0;
+if(allotted){qty=parseInt(prompt('How many shares were allotted? (number in the result table)',String(F.lotSize||0))||'0',10);
+if(!qty||qty<1){bar('\u26A0 Cancelled \u2014 no share count entered. Nothing was saved.');return;}}
+bar('\u23F3 Saving verdict to the app\u2026');
+fetch('/api/applications',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({ipo_id:F.ipoId,account_id:F.accId,applied:1,
+allotment:allotted?'allotted':'not_allotted',allotted_qty:allotted?qty:0})})
+.then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();})
+.then(function(){bar(allotted?('\u2705 Saved: <b>'+F.accName+'</b> = ALLOTTED '+qty+' sh. Tap CLEAR (form top) and check the next account.')
+:('\u2705 Saved: <b>'+F.accName+'</b> = NOT allotted \u2014 refund auto-queued in the app. Next account when ready.'));})
+.catch(function(){bar('\u26A0 Save failed (session expired?) \u2014 note the verdict and mark this row in the app yourself.');});}
 })();</script>"""
 
 _BS_DOWN_HTML = """<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1864,6 +1896,7 @@ def bs_open(ipo: int = 0, acc: int = 0):
     pan = (a.get("pan") or "").strip().upper()
     cdsl = re.sub(r"\D", "", a.get("cdsl") or "")
     fill = {"ipoName": i["name"], "accName": a.get("holder", ""),
+            "ipoId": i["id"], "accId": a["id"], "lotSize": i.get("lot_size") or 0,
             "companyId": comp["id"] if comp else "",
             "companyName": comp["name"] if comp else i["name"],
             "selType": "PN" if pan else ("BN" if cdsl else ""),
