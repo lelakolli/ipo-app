@@ -31,6 +31,7 @@
 import json
 import re
 import time
+import html as _html
 from datetime import datetime, timedelta
 
 IPOWATCH = "https://ipowatch.in"
@@ -81,8 +82,26 @@ def _get(url, retries=2, timeout=25):
     raise RuntimeError(last or "fetch failed")
 
 
+def _disp(txt):
+    """Source sites leak HTML entities into labels (&amp;, &nbsp;). Decode to
+    plain text so the Market tab cell is what the site VISUALLY shows — the
+    frontend's own esc() then displays '&' correctly instead of '&amp;'."""
+    return re.sub(r"\s+", " ", _html.unescape(str(txt or "")).replace("\xa0", " ")).strip()
+
+
+def _decode_rows(rows):
+    """Belt-and-braces scrub of board-row strings (name/close_txt/dates_txt/…)
+    before they are cached + displayed — catches legacy rows built from the
+    in-server IPOJi feeds that never pass through _cells."""
+    for r in rows:
+        for k, v in list(r.items()):
+            if isinstance(v, str) and ("&" in v or "\xa0" in v):
+                r[k] = _disp(v)
+    return rows
+
+
 def _cells(tr_html):
-    return [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c)).strip()
+    return [_disp(re.sub(r"<[^>]+>", " ", c))
             for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr_html, re.S)]
 
 
@@ -390,6 +409,7 @@ def refresh_market(force=False, gap=None):
                 if not legacy:
                     continue
                 rows_sorted = legacy
+            _decode_rows(rows_sorted)  # no &amp;/&nbsp; ever reaches the Market tab
             s.kv_set(kv_key, json.dumps({"at": now, "rows": rows_sorted[:MAX_BOARD_ROWS]}))
         except Exception:  # noqa: BLE001
             pass

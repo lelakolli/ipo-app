@@ -476,28 +476,40 @@ function renderDash(){
     const total=S.accounts.filter(a=>a.active).length;
     if(applied<total)acts.push({t:'Not all accounts applied',d:`<b>${esc(i.name)}</b> — applied ${applied}/${total} (closes ${fd(i.close_date)})`,act:`goApps(${i.id})`});});
 
-  // 📌 TODAY strip — one-glance, time-critical items with tap-to-open
+  // 📌 ACT NOW strip — money items needing a phone-side action (refunds / mandates)
   const pills=[];
-  S.ipos.filter(i=>i.status==='open'&&i.close_date===S.today).forEach(i=>
-    pills.push({ic:'⏰',t:`<b>${esc(i.name)}</b> closes today`,s:`GMP ₹${num(i.gmp||0)} • apply by ~1 PM`,cls:'neg',act:`goApps(${i.id})`}));
-  S.ipos.filter(i=>i.open_date===S.today&&i.status==='upcoming').forEach(i=>
-    pills.push({ic:'🚀',t:`<b>${esc(i.name)}</b> opens today`,s:i.gmp?`GMP ₹${num(i.gmp)}`:'',act:`goApps(${i.id})`}));
-  S.ipos.filter(i=>i.allotment_date&&i.status==='result_pending'&&i.allotment_date<=S.today).forEach(i=>
-    pills.push({ic:'🎯',t:`<b>${esc(i.name)}</b> allotment due`,s:'tap to auto-check',act:`goApps(${i.id},1)`}));
-  S.ipos.filter(i=>i.listing_date===S.today).forEach(i=>{
-    const sh=S.applications.filter(a=>a.ipo_id===i.id&&a.allotment==='allotted').reduce((s,a)=>s+(a.allotted_qty||0),0);
-    pills.push({ic:'🔔',t:`<b>${esc(i.name)}</b> lists today`,s:sh?`${sh} sh held${i.cmp?` • CMP ₹${num(i.cmp)}`:''}`:(i.gmp?`last GMP ₹${num(i.gmp)}`:''),act:`goApps(${i.id})`});});
   const rfp=apps.filter(a=>a.allotment==='not_allotted'&&a.refund==='pending');
   if(rfp.length)pills.push({ic:'🔓',t:`${rfp.length} refunds pending`,s:kr(rfp.reduce((s,a)=>s+a.amount,0))+' to unblock',act:`goApps(${rfp[0].ipo_id})`});
   const mp=apps.filter(a=>a.mandate_status==='pending'&&(ipoById(a.ipo_id)||{}).status==='open');
   if(mp.length)pills.push({ic:'⏳',t:`${mp.length} UPI mandates waiting`,s:'approve on the phones — tap to open',cls:'neg',act:`goApps(${mp[0].ipo_id})`});
-  const todayStrip=pills.length?`<div class="mut" style="font-size:11.5px;font-weight:700;letter-spacing:.6px;margin:4px 0 6px">📌 TODAY</div>
+  const todayStrip=pills.length?`<div class="mut" style="font-size:11.5px;font-weight:700;letter-spacing:.6px;margin:4px 0 6px">📌 ACT NOW — money items</div>
     <div style="display:flex;gap:8px;overflow-x:auto;padding:0 0 10px;-webkit-overflow-scrolling:touch">${
     pills.map(p=>`<div class="tpill ${p.cls||''}" ${p.act?`onclick="${p.act}"`:''}><span style="font-size:20px">${p.ic}</span><span><div style="font-size:13px;font-weight:600;white-space:nowrap">${p.t}</div><div class="mut" style="font-size:11px;white-space:nowrap">${p.s}</div></span></div>`).join('')}</div>`:'';
+
+  // 📆 TODAY'S ACTIVITY — the 4 event types lined up; ALWAYS shown, so "— none today" is an answer too
+  const taOpen=S.ipos.filter(i=>i.open_date===S.today);
+  const taClose=S.ipos.filter(i=>i.close_date===S.today);
+  const taAllot=S.ipos.filter(i=>i.allotment_date===S.today);
+  const taList=S.ipos.filter(i=>i.listing_date===S.today);
+  const taChip=(i,extra,check)=>`<span class="chip" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px" title="${check?'Tap to run the allotment check':'Tap to open'}" onclick="goApps(${i.id}${check?',1':''})"><b>${esc(i.name)}</b>${extra||''}</span>`;
+  const taRow=(ix,ic,label,rows,mk)=>`<div style="display:flex;gap:10px;padding:7px 0;align-items:flex-start;${ix<3?'border-bottom:1px solid var(--line);':''}">
+      <span style="font-size:17px;line-height:1.3">${ic}</span>
+      <div style="flex:1;min-width:0"><span style="font-size:12.5px;font-weight:700">${label}</span>
+      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:${rows.length?5:1}px">${rows.length?rows.map(mk).join(''):'<span class="mut" style="font-size:11.5px">— none today</span>'}</div></div></div>`;
+  const nAct=S.accounts.filter(a=>a.active).length;
+  const todayActs=`<div class="card" style="margin-bottom:12px">
+    <h3 style="margin:0 0 2px">📆 Today's activity <small>— ${fd(S.today)} • tap a name to jump in</small></h3>${
+    taRow(0,'🚀','Opened for application',taOpen,i=>taChip(i,i.gmp?` · GMP ₹${num(i.gmp)}`:'')) +
+    taRow(1,'⏰','Closing today (apply by ~1 PM)',taClose,i=>taChip(i,` · applied ${S.applications.filter(a=>a.ipo_id===i.id&&a.applied).length}/${nAct}${i.gmp?` · GMP ₹${num(i.gmp)}`:''}`)) +
+    taRow(2,'🎯','Allotment today',taAllot,i=>taChip(i,` · ${esc(i.registrar)} · tap to check`,1)) +
+    taRow(3,'🔔','Listing today',taList,i=>{const sh=S.applications.filter(a=>a.ipo_id===i.id&&a.allotment==='allotted').reduce((s,a)=>s+(a.allotted_qty||0),0);
+      return taChip(i,sh?` · holding ${num(sh)} sh`:(i.mkt&&i.mkt.est_listing?` · est ₹${num(i.mkt.est_listing)}`:''));})
+    }</div>`;
 
   el.innerHTML=`
   <div class="info">💡 Allotment is <b>PAN-based</b> — keep one unique PAN per account or exchanges reject duplicate bids. This app never asks for your demat/broker passwords; allotment checks use only PAN / CDSL BO ID (public registrar data). <b>Tap any summary box below for its full break-up.</b></div>
   ${todayStrip}
+  ${todayActs}
   <div class="grid-kpi">
     <div class="kpi" onclick="dashDrill('open')" title="Tap for the list"><div class="l">IPOs open now</div><div class="v">${openIpos.length}</div><div class="s">${S.ipos.filter(i=>i.status==='upcoming').length} upcoming • tap for details</div></div>
     <div class="kpi" onclick="dashDrill('blocked')" title="Tap for the break-up"><div class="l">Capital blocked</div><div class="v">${kr(blocked)}</div><div class="s">money still blocked in UPI — excludes debited (allotted), unblocked & sold-back amounts</div></div>
@@ -542,9 +554,9 @@ function renderDash(){
   <div class="card">
     <h3>🔑 App passcode</h3>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <input id="pc-cur" inputmode="numeric" maxlength="6" placeholder="current 6-digit" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
-      <input id="pc-new" inputmode="numeric" maxlength="6" placeholder="new 6-digit" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
-      <input id="pc-new2" inputmode="numeric" maxlength="6" placeholder="repeat new" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
+      <input id="pc-cur" type="password" inputmode="numeric" maxlength="6" placeholder="current 6-digit" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
+      <input id="pc-new" type="password" inputmode="numeric" maxlength="6" placeholder="new 6-digit" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
+      <input id="pc-new2" type="password" inputmode="numeric" maxlength="6" placeholder="repeat new" style="width:130px;background:var(--input);border:1px solid var(--line);border-radius:9px;padding:9px;color:var(--txt)">
       <button class="btn sm" onclick="changePass()">Change passcode</button>
       <button class="btn sm ghost" onclick="fpRegister()" title="Unlock this app with your phone's fingerprint / screen lock">👆 Register fingerprint unlock</button>
     </div>
@@ -701,6 +713,9 @@ function renderIpos(){
     return `<button class="btn sm ${view===v?'':'ghost'}" title="${meta[1]}" onclick="setIpoView('${v}')" style="min-width:92px">${meta[0]} <b>${n}</b></button>`;};
   window.setIpoView=v=>{window.ipoView=v;localStorage.setItem('ipoView',v);renderIpos();};
   const live=liveAll.filter(i=>bucket(i)===view);
+  // Closed view: latest first — newest listing (fallback: allotment, then close date) at the top
+  if(view==='closed'){const ck=i=>i.listing_date||i.allotment_date||i.close_date||'';
+    live.sort((a,b)=>ck(b).localeCompare(ck(a)));}
   const arc=S.ipos.filter(archivable).sort((a,b)=>(b.listing_date||'').localeCompare(a.listing_date||''));
   el.innerHTML=`
   <div class="toolbar">
@@ -771,14 +786,13 @@ function renderAccounts(){
   ${S.accounts.map((a,ix)=>{const apps=S.applications.filter(x=>x.account_id===a.id&&x.applied);
     const booked=apps.reduce((s,x)=>s+bookedPnl(x),0);
     const wins=apps.filter(x=>x.allotment==='allotted');
-    const winNames=wins.map(x=>esc((ipoById(x.ipo_id)||{}).name||('IPO #'+x.ipo_id)));
     return `<tr>
     <td class="stick c1 mut">${ix+1}</td>
     <td class="stick c2"><b>${esc(a.holder)}</b>${a.active?'':' <span class="chip c-closed">inactive</span>'}${a.notes?`<br><span class="mut" style="font-size:11.5px">${esc(a.notes)}</span>`:''}</td>
     <td class="${pnlCls(booked)}">${apps.some(x=>x.sell_qty>0)?pnlTxt(booked):'—'}</td>
     <td><code>${esc(a.upi)||'<span class="mut">—</span>'}</code></td>
     <td>${apps.length}</td>
-    <td title="${winNames.join(', ')||'No allotments yet'}">${wins.length?`<b class="pos">${wins.length} ✓</b><br><span class="mut" style="font-size:11px">${winNames.slice(0,2).join(', ')}${winNames.length>2?` +${winNames.length-2} more`:''}</span>`:'<span class="mut">0</span>'}</td>
+    <td>${wins.length?`<a role="link" style="color:var(--acc2);text-decoration:underline;font-weight:800;font-size:15px;cursor:pointer" title="Tap to see the allotted IPOs" onclick="showAllocFor(${a.id})">${wins.length} ✓</a>`:'<span class="mut">0</span>'}</td>
     <td>${esc(a.pan)||'<span class="mut">—</span>'}</td>
     <td>${esc(a.cdsl)||'<span class="mut">—</span>'}</td>
     <td class="row-actions" style="white-space:nowrap">
@@ -798,6 +812,26 @@ window.delAcc=async(id,name)=>{
             :`Delete account "${name}"?`;
   if(!confirm(msg))return;
   await api('/api/accounts/'+id,'DELETE');toast('Deleted');refresh();};
+// Accounts tab → tap the allotted COUNT to see exactly which IPOs this
+// applicant won (tooltips don't work on phone long-press — tap-to-open modal).
+window.showAllocFor=(accId)=>{
+  const a=accById(accId)||{};
+  const won=S.applications.filter(x=>x.account_id===accId&&x.applied&&x.allotment==='allotted')
+    .sort((x,y)=>((ipoById(y.ipo_id)||{}).listing_date||'').localeCompare((ipoById(x.ipo_id)||{}).listing_date||''));
+  const tot=won.reduce((t,x)=>t+bookedPnl(x)+unrealPnl(x,ipoById(x.ipo_id)||{}),0);
+  const body=won.length?won.map(x=>{
+    const ipo=ipoById(x.ipo_id)||{};
+    const pnl=bookedPnl(x)+unrealPnl(x,ipo);
+    return `<div style="display:flex;justify-content:space-between;gap:10px;padding:10px 2px;border-bottom:1px solid var(--line)">
+      <div><a role="link" style="color:var(--acc2);font-weight:750;text-decoration:underline;cursor:pointer;font-size:14.5px"
+              onclick="closeModal();goApps(${x.ipo_id})">${esc(ipo.name||('IPO #'+x.ipo_id))}</a>
+      <div class="mut" style="font-size:12px;margin-top:3px">${x.allotted_qty} sh won${ipo.price_max?` @ ₹${num(x.amount/(x.allotted_qty||1))}`:''}${ipo.listing_date?` • listed ${fd(ipo.listing_date)}`:''}${(x.sell_qty||0)>0?` • sold ${x.sell_qty} sh @ ₹${num(x.sell_price)}`:(ipo.cmp?` • CMP ₹${num(ipo.cmp)}`:' • holding')}</div></div>
+      <div class="f-pnl ${pnlCls(pnl)}" style="text-align:right;white-space:nowrap">${pnlTxt(pnl)}</div></div>`;}).join('')
+    :'<div class="mut" style="padding:10px 2px">No allotments yet for this applicant.</div>';
+  openModal(`<div class="card"><h3 style="margin:0 0 8px">✅ ${esc(a.holder||'Applicant')} — IPOs allotted (${won.length})</h3>
+    <div style="max-height:56vh;overflow:auto">${body}</div>
+    ${won.length?`<div style="display:flex;justify-content:space-between;padding:11px 2px 0;font-weight:800"><span>Total P&amp;L</span><span class="f-pnl ${pnlCls(tot)}">${pnlTxt(tot)}</span></div>`:''}
+    <div class="foot"><button class="btn ghost" onclick="closeModal()">Close</button></div></div>`);};
 window.accModal=(id)=>{
   const a=id?accById(id):{holder:'',pan:'',cdsl:'',broker:'',bank:'',upi:'',auth_mode:'',notes:'',active:1};
   openModal(`<h3>${id?'Edit':'Add'} account</h3><div class="form-grid">

@@ -1544,7 +1544,7 @@ if CONF_FILE.exists():
     CONF = json.loads(CONF_FILE.read_text())
 else:
     CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}
-    print(f"[boot] FIRST-RUN PASSCODE: {CONF['passcode']} — log in once, then change it in Settings", flush=True)
+    print(f"[FIRST-RUN PASSCODE] {CONF['passcode']} — change it in the app (Dashboard -> App passcode).", flush=True)
     try:
         CONF_FILE.write_text(json.dumps(CONF))
     except Exception:
@@ -1644,7 +1644,7 @@ button:focus-visible{outline:none;box-shadow:var(--ring)}
 .hint{color:var(--mut);font-size:11px;margin-top:14px;line-height:1.55}</style></head><body>
 <div class="box"><div class="mark">📈</div><h2>IPO <span>Command Center</span></h2>
 <p class="sub">Enter your 6-digit passcode<br><span style="opacity:.8">Auto-locks 5 minutes after you close the app</span></p>
-<input id="c" inputmode="numeric" maxlength="6" autocomplete="off" autofocus>
+<input id="c" type="password" inputmode="numeric" maxlength="6" autocomplete="off" autofocus>
 <button onclick="go()">Unlock</button>
 <button id="fp" style="display:none;background:transparent;border:1px solid var(--acc);color:var(--acc2);margin-top:10px;box-shadow:none" onclick="fp()">👆 Unlock with fingerprint</button><div class="err" id="e"></div>
 <p class="hint">Forgot it? If you set a PASSCODE in your hosting dashboard, change it there. Otherwise check the hosting logs for the line "FIRST-RUN PASSCODE".</p></div>
