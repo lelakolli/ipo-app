@@ -1891,9 +1891,30 @@ if(F.selType==='PN'&&F.pan){var p=document.getElementById('txtpan');if(p){p.valu
 else if(F.selType==='BN'&&F.cdsl){var ty=document.getElementById('ddlType');if(ty){ty.value='CDSL';}
 var c=document.getElementById('txtcsdl');if(c){c.value=F.cdsl;f2='BO ID <b>'+F.cdsl+'</b> filled';}}
 var co=sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].text:'';
-bar((okCo?'\\u2705 <b>'+co+'</b> selected':'\\u26A0 Company not in the list yet (allotment link may not be live) \\u2014 pick <b>'+(F.companyName||'')+'</b> yourself')
-+'<br>'+(f2?f2+' for <b>'+(F.accName||'')+'</b>.':'No PAN/BO ID stored for <b>'+(F.accName||'')+'</b> \\u2014 type it yourself.')
+bar((okCo?'\u2705 <b>'+co+'</b> selected':'\u26A0 <b>'+(F.companyName||'')+'</b> is <b>not in Bigshare\u2019s dropdown yet</b> — their list shows only <b>'+Math.max(0,(sel.options||[]).length-1)+'</b> live issue(s) right now. Allotment pages usually flip late in the evening — nothing is broken, recheck later tonight. The app\u2019s auto-check also keeps polling the registrar.')
++'<br>'+(f2?f2+' for <b>'+(F.accName||'')+'</b>.':'No PAN/BO ID stored for <b>'+(F.accName||'')+'</b> \u2014 type it yourself.')
 +'<br>Now just read the captcha picture and tap <b>SEARCH</b>.');
+// captcha watchdog: their own loader needs jQuery (CDN-first) and one clean
+// round-trip through us — either can hiccup on a cold host or a fast tap.
+// If the picture is not there ~2s after load, fetch it ourselves (no jQuery
+// needed), retry up to ~18 times, then admit it honestly with a manual way out.
+var capTries=0;
+function captchaLoaded(){var img=document.getElementById('captcha');return !!(img&&String(img.getAttribute('src')||'').length>60);}
+function watchCaptcha(){
+  if(captchaLoaded())return;
+  if(++capTries>18){bar('⚠ Captcha still not loading — tap the grey wall’s refresh icon, or reload this page (the free host wakes slowly on the first open).');return;}
+  bar('⏳ Captcha picture coming slowly — retrying… ('+capTries+')');
+  fetch('Captcha.ashx',{cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();}).then(function(j){
+    var b=j.image||j.Image,t=j.token||j.Token;
+    if(!b){throw new Error('empty');}
+    var el=document.getElementById('captcha');if(el){el.setAttribute('src',b);}
+    try{captchaToken=t;}catch(e){try{window.captchaToken=t;}catch(_){}}
+    bar('✅ Captcha picture loaded — type what you see in the box and tap <b>SEARCH</b>.');
+  }).catch(function(){setTimeout(watchCaptcha,2600);});
+}
+setTimeout(watchCaptcha,2200);
+var rf=document.getElementById('refresh-captcha');
+if(rf){rf.addEventListener('click',function(){setTimeout(function(){if(!captchaLoaded()){capTries=0;watchCaptcha();}},1500);});}
 var cap=document.getElementById('captcha-input');
 if(cap){setTimeout(function(){try{cap.scrollIntoView({block:'center'});cap.focus();}catch(e){}},700);}
 // once a result (or the "No Record" popup) is on screen, offer the one-tap verdict
