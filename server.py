@@ -1875,6 +1875,25 @@ x.onclick=function(){d.remove();};
 var s=document.createElement('span');d.appendChild(s);d.appendChild(x);
 (document.body||document.documentElement).appendChild(d);}
 d.querySelector('span').innerHTML=html;}
+// captcha watchdog (IIFE scope — go() and the lite-mode buttons both use it):
+// their own loader needs jQuery (CDN-first) and one clean round-trip through
+// us — either can hiccup on a cold host or a fast tap. If the picture is not
+// there ~2s after load, fetch it ourselves (no jQuery needed), retry up to
+// ~18 times, then admit it honestly with a manual way out.
+var capTries=0;
+function captchaLoaded(){var img=document.getElementById('captcha');return !!(img&&String(img.getAttribute('src')||'').length>60);}
+function watchCaptcha(){
+  if(captchaLoaded())return;
+  if(++capTries>18){bar('⚠ Captcha still not loading — tap the grey wall’s refresh icon, or reload this page (the free host wakes slowly on the first open).');return;}
+  bar('⏳ Captcha picture coming slowly — retrying… ('+capTries+')');
+  fetch('Captcha.ashx',{cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();}).then(function(j){
+    var b=j.image||j.Image,t=j.token||j.Token;
+    if(!b){throw new Error('empty');}
+    var el=document.getElementById('captcha');if(el){el.setAttribute('src',b);}
+    try{captchaToken=t;}catch(e){try{window.captchaToken=t;}catch(_){}}
+    bar('✅ Captcha picture loaded — type what you see in the box and tap <b>SEARCH</b>.');
+  }).catch(function(){setTimeout(watchCaptcha,2600);});
+}
 function go(){var sel=document.getElementById('ddlCompany');
 if(!sel){if(++tries<60)setTimeout(go,300);return;}
 if((sel.options||[]).length<2){if(++tries<60)setTimeout(go,300);return;}
@@ -1894,24 +1913,6 @@ var co=sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].text:'';
 bar((okCo?'\u2705 <b>'+co+'</b> selected':'\u26A0 <b>'+(F.companyName||'')+'</b> is <b>not in Bigshare\u2019s dropdown yet</b> — their list shows only <b>'+Math.max(0,(sel.options||[]).length-1)+'</b> live issue(s) right now. Allotment pages usually flip late in the evening — nothing is broken, recheck later tonight. The app\u2019s auto-check also keeps polling the registrar.')
 +'<br>'+(f2?f2+' for <b>'+(F.accName||'')+'</b>.':'No PAN/BO ID stored for <b>'+(F.accName||'')+'</b> \u2014 type it yourself.')
 +'<br>Now just read the captcha picture and tap <b>SEARCH</b>.');
-// captcha watchdog: their own loader needs jQuery (CDN-first) and one clean
-// round-trip through us — either can hiccup on a cold host or a fast tap.
-// If the picture is not there ~2s after load, fetch it ourselves (no jQuery
-// needed), retry up to ~18 times, then admit it honestly with a manual way out.
-var capTries=0;
-function captchaLoaded(){var img=document.getElementById('captcha');return !!(img&&String(img.getAttribute('src')||'').length>60);}
-function watchCaptcha(){
-  if(captchaLoaded())return;
-  if(++capTries>18){bar('⚠ Captcha still not loading — tap the grey wall’s refresh icon, or reload this page (the free host wakes slowly on the first open).');return;}
-  bar('⏳ Captcha picture coming slowly — retrying… ('+capTries+')');
-  fetch('Captcha.ashx',{cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();}).then(function(j){
-    var b=j.image||j.Image,t=j.token||j.Token;
-    if(!b){throw new Error('empty');}
-    var el=document.getElementById('captcha');if(el){el.setAttribute('src',b);}
-    try{captchaToken=t;}catch(e){try{window.captchaToken=t;}catch(_){}}
-    bar('✅ Captcha picture loaded — type what you see in the box and tap <b>SEARCH</b>.');
-  }).catch(function(){setTimeout(watchCaptcha,2600);});
-}
 setTimeout(watchCaptcha,2200);
 var rf=document.getElementById('refresh-captcha');
 if(rf){rf.addEventListener('click',function(){setTimeout(function(){if(!captchaLoaded()){capTries=0;watchCaptcha();}},1500);});}
@@ -1949,7 +1950,73 @@ allotment:allotted?'allotted':'not_allotted',allotted_qty:allotted?qty:0})})
 .then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();})
 .then(function(){bar(allotted?('\u2705 Saved: <b>'+F.accName+'</b> = ALLOTTED '+qty+' sh. Tap CLEAR (form top) and check the next account.')
 :('\u2705 Saved: <b>'+F.accName+'</b> = NOT allotted \u2014 refund auto-queued in the app. Next account when ready.'));})
-.catch(function(){bar('\u26A0 Save failed (session expired?) \u2014 note the verdict and mark this row in the app yourself.');});}
+.catch(function(){bar('⚠ Save failed (session expired?) — note the verdict and mark this row in the app yourself.');});}
+// ---------------------------------------------------------------------------
+// LITE MODE — their page's SEARCH / refresh / CLEAR live inside jQuery, which
+// comes from the Google CDN FIRST. On a slow phone network jQuery never lands,
+// the buttons go dead, the captcha has no refresh, and the empty result table
+// stays visible. Detect once (~3s) and re-wire the essentials in plain JS —
+// same endpoints, same payload contract as their own code. If jQuery is fine,
+// we stand down and their page works natively.
+// ---------------------------------------------------------------------------
+function gv(id){var e=document.getElementById(id);return e?(e.value||''):'';}
+function st(id,v){var e=document.getElementById(id);if(e)e.textContent=(v==null?'':String(v));}
+function liteSearch(){
+  var co=gv('ddlCompany'),st0=gv('SelectionType'),ans=gv('captcha-input');
+  if(!co||co==='--Select Company--'||co==='0'){bar('⚠ Pick the company from the list first.');return;}
+  var tok='';try{tok=captchaToken||'';}catch(e){try{tok=window.captchaToken||'';}catch(_){}}
+  if(!tok||!ans){bar('⚠ Type the CODE from the captcha picture first.');if(!tok){capTries=0;watchCaptcha();}return;}
+  var payload={Applicationno:gv('txtapplication'),Company:co,SelectionType:st0,PanNo:gv('txtpan'),
+    txtcsdl:gv('txtcsdl'),txtDPID:gv('txtDPID'),txtClId:gv('txtClId'),ddlType:gv('ddlType'),
+    lang:gv('ddllang'),CaptchaToken:tok,CaptchaAnswer:ans,ResultToken:''};
+  bar('⏳ Searching Bigshare…');
+  fetch('Data.aspx/FetchIpodetails',{method:'POST',headers:{'Content-Type':'application/json; charset=utf-8'},body:JSON.stringify(payload)})
+  .then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();})
+  .then(function(d){
+    var C=(d&&d.d)||{};var cs=C.Status||'';
+    if(C.ResultToken){try{resultToken=C.ResultToken;}catch(e){try{window.resultToken=C.ResultToken;}catch(_){}}}
+    if(cs&&cs!=='OK'&&cs!=='NOTFOUND'){
+      capTries=0;setTimeout(watchCaptcha,300);
+      var msg=C.Message||'Please try again.';
+      if(cs==='CAPTCHA')msg='Wrong captcha code — a fresh picture loaded below; retype it and SEARCH again.';
+      if(cs==='RATELIMIT')msg='Bigshare is rate-limiting — wait ~30 seconds and try again.';
+      if(cs==='WARMING')msg='Bigshare is warming up — try again in a few seconds.';
+      var lb=document.getElementById('captcha-input');if(lb)lb.value='';
+      bar('⚠ '+msg);return;}
+    if(cs==='NOTFOUND'){
+      var lb2=document.getElementById('captcha-input');if(lb2)lb2.value='';
+      capTries=0;setTimeout(watchCaptcha,300);
+      bar('❌ No Record Found for this PAN — either this account did not apply, or the registrar has no row yet. If you are sure you applied, recheck the PAN.');return;}
+    st('lbl1',C.APPLICATION_NO);st('lbl2',C.DPID);st('lbl3',C.Name);st('lbl4',C.APPLIED);st('lbl5',C.ALLOTED);
+    st('th1',C.H_APPLICATION_NO||'Application No');st('th2',C.H_DPID||'DP ID/CL ID or Folio');st('th3',C.H_Name||'Name');st('th4',C.H_APPLIED||'Applied');st('th5',C.H_ALLOTED||'Alloted');
+    var dm=document.getElementById('dMore');
+    if(dm&&C.MatchCount>1&&C.Records){
+      var h='<b>'+C.MatchCount+' applications found for this search. All listed below.</b><table class="table table-striped table-bordered" style="width:100%"><tr><th></th><th>'+esc(C.H_APPLICATION_NO||'Application No')+'</th><th>'+esc(C.H_DPID||'DP ID/CL ID or Folio')+'</th><th>'+esc(C.H_Name||'Name')+'</th><th>'+esc(C.H_APPLIED||'Applied')+'</th><th>'+esc(C.H_ALLOTED||'Alloted')+'</th></tr>';
+      C.Records.forEach(function(R,i){h+='<tr><td>'+(i+1)+'</td><td>'+esc(R.APPLICATION_NO)+'</td><td>'+esc(R.DPID)+'</td><td>'+esc(R.Name)+'</td><td>'+esc(R.APPLIED)+'</td><td>'+esc(R.ALLOTED)+'</td></tr>';});
+      dm.innerHTML=h+'</table>';dm.style.display='';}
+    var dp=document.getElementById('dPrint');if(dp){dp.style.display='';}
+    var sc=document.getElementById('dPrint');if(sc){try{sc.scrollIntoView({block:'center'});}catch(e){}}
+    bar('✅ Result is on screen — send it back with ONE tap:');
+  })
+  .catch(function(e){bar('⚠ Search failed ('+e.message+') — tap SEARCH again.');});
+}
+setTimeout(function(){
+  try{watchCaptcha();}catch(e){}
+  try{if(window.jQuery)return;}catch(e){}
+  bar('⚠ Their page scripts did not load (slow network) — <b>lite mode on</b>: the visible buttons below do the same job.');
+  var rf=document.getElementById('refresh-captcha');
+  if(rf){rf.innerHTML='&#8635;';rf.title='New captcha';
+    rf.style.cssText='display:inline-flex;align-items:center;justify-content:center;min-width:42px;min-height:42px;font-size:22px;background:#ffffff;border:1px solid #c8d2dc;border-radius:8px;margin-left:6px;color:#123;cursor:pointer';
+    rf.addEventListener('click',function(){capTries=0;watchCaptcha();});}
+  var bs=document.getElementById('btn_Search');
+  if(bs){bs.addEventListener('click',function(e){if(e.preventDefault)e.preventDefault();
+    try{if(window.jQuery){bar('↻ Page scripts just arrived — reloading once so their own SEARCH takes over…');setTimeout(function(){location.reload();},600);return;}}catch(err){}
+    liteSearch();});}
+  var bc=document.getElementById('btn_clear');
+  if(bc){bc.addEventListener('click',function(){location.reload();});}
+  var dp=document.getElementById('dPrint');if(dp&&!dp.textContent.match(/NON|ALLOTED|[0-9]{3,}/)){dp.style.display='none';}
+},3200);
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 })();</script>"""
 
 _BS_DOWN_HTML = """<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1999,7 +2066,7 @@ def bs_open(ipo: int = 0, acc: int = 0):
         page = page[:idx] + inject + page[idx:]
     else:
         page += inject
-    resp = HTMLResponse(page)
+    resp = HTMLResponse(page, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
     _bs_set_cookies(resp, r)
     print(f"[bs-assist] opened for ipo={ipo} acc={acc} company={fill['companyId'] or '-'}", flush=True)
     return resp
@@ -2041,6 +2108,11 @@ async def bs_proxy(upath: str, request: Request):
     resp = Response(content=r.content, status_code=r.status_code)
     if r.headers.get("content-type"):
         resp.headers["content-type"] = r.headers["content-type"]
+    if url.rsplit("?", 1)[0].lower().endswith((".ashx", ".aspx")) or "Data.aspx" in url:
+        # captcha JSON / search responses must NEVER be cached — otherwise a
+        # page refresh shows yesterday's picture while the token has moved on.
+        resp.headers["cache-control"] = "no-store"
+        resp.headers["pragma"] = "no-cache"
     if r.headers.get("location"):
         resp.headers["location"] = _bs_rewrite_location(r.headers["location"], url)
     if r.headers.get("retry-after"):
