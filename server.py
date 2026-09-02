@@ -1873,6 +1873,12 @@ var x=document.createElement('button');x.textContent='\\u2715';
 x.style.cssText='position:absolute;top:8px;right:10px;background:none;border:0;color:#8fa3b8;font-size:17px;cursor:pointer';
 x.onclick=function(){d.remove();};
 var s=document.createElement('span');d.appendChild(s);d.appendChild(x);
+var m=document.createElement('button');m.textContent='▾';m.title='shrink / expand';
+m.style.cssText='position:absolute;top:8px;right:32px;background:none;border:0;color:#8fa3b8;font-size:17px;cursor:pointer';
+m.onclick=function(){var sp=d.querySelector('span');var w=document.getElementById('ipoassist-mark');
+  if(d.dataset.min){delete d.dataset.min;sp.style.display='';if(w)w.style.display='';}
+  else{d.dataset.min='1';sp.style.display='none';if(w)w.style.display='none';}};
+d.appendChild(m);
 (document.body||document.documentElement).appendChild(d);}
 d.querySelector('span').innerHTML=html;}
 // captcha watchdog (IIFE scope — go() and the lite-mode buttons both use it):
@@ -1886,12 +1892,13 @@ function watchCaptcha(){
   if(captchaLoaded())return;
   if(++capTries>18){bar('⚠ Captcha still not loading — tap the grey wall’s refresh icon, or reload this page (the free host wakes slowly on the first open).');return;}
   bar('⏳ Captcha picture coming slowly — retrying… ('+capTries+')');
-  fetch('Captcha.ashx',{cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();}).then(function(j){
+  fetch('Captcha.ashx?_='+Date.now(),{cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();}).then(function(j){
     var b=j.image||j.Image,t=j.token||j.Token;
     if(!b){throw new Error('empty');}
     var el=document.getElementById('captcha');if(el){el.setAttribute('src',b);}
     try{captchaToken=t;}catch(e){try{window.captchaToken=t;}catch(_){}}
-    bar('✅ Captcha picture loaded — type what you see in the box and tap <b>SEARCH</b>.');
+    window.__capN=(window.__capN||0)+1;
+    bar('✅ Captcha picture #'+window.__capN+' loaded (fresh, just now) — type what you see in the box and tap <b>SEARCH</b>.');
   }).catch(function(){setTimeout(watchCaptcha,2600);});
 }
 // The value boxes (#PanNumber / #CDSLContent / #dp_sec / #ApplicationNo) start
@@ -1903,6 +1910,26 @@ function syncVis(){var hd=function(id,on){var z=document.getElementById(id);if(z
  var t2='';try{t2=(document.getElementById('ddlType')||{}).value||'';}catch(e){}
  hd('PanNumber',v==='PN');hd('ApplicationNo',v==='AP');hd('BeneficiaryId',v==='BN');
  hd('CDSLContent',v==='BN'&&t2==='CDSL');hd('dp_sec',v==='BN'&&t2==='NSDL');}
+// Permanent ↻ captcha-refresh button NEXT TO the picture: their refresh icon
+// is a glyph from remixicon.css served off cdn.jsdelivr.net — external CDNs
+// (googleapis jQuery too) demonstrably fail on this user's network, leaving a
+// zero-content invisible button. Ours is a plain text character: it renders
+// even if every CDN is down, and it never needs jQuery.
+var capUiTries=0;
+function installCapUi(){
+  var img=document.getElementById('captcha');
+  if(!img){if(++capUiTries<40)setTimeout(installCapUi,300);return;}
+  if(document.getElementById('ipoassist-cap'))return;
+  var b=document.createElement('button');b.id='ipoassist-cap';b.type='button';b.title='New captcha picture';
+  b.textContent='↻';
+  b.style.cssText='display:inline-flex;align-items:center;justify-content:center;width:46px;height:46px;font-size:23px;line-height:1;background:#ffffff;border:2px solid #0b3570;border-radius:9px;margin-left:8px;color:#0b3570;cursor:pointer;vertical-align:middle';
+  b.onclick=function(){capTries=0;watchCaptcha();};
+  img.parentNode.insertBefore(b,img.nextSibling);
+}
+setTimeout(installCapUi,800);
+// The guidance bar is fixed at the bottom — without padding it literally COVERS
+// the result table's last rows on short screens. Give the page scroll room.
+setTimeout(function(){try{document.body.style.paddingBottom='150px';}catch(e){}},500);
 function go(){var sel=document.getElementById('ddlCompany');
 if(!sel){if(++tries<60)setTimeout(go,300);return;}
 if((sel.options||[]).length<2){if(++tries<60)setTimeout(go,300);return;}
