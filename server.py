@@ -1888,18 +1888,20 @@ d.querySelector('span').innerHTML=html;}
 // ~18 times, then admit it honestly with a manual way out.
 var capTries=0;
 function captchaLoaded(){var img=document.getElementById('captcha');return !!(img&&String(img.getAttribute('src')||'').length>60);}
-function watchCaptcha(){
-  if(captchaLoaded())return;
-  if(++capTries>18){bar('⚠ Captcha still not loading — tap the grey wall’s refresh icon, or reload this page (the free host wakes slowly on the first open).');return;}
-  bar('⏳ Captcha picture coming slowly — retrying… ('+capTries+')');
+function watchCaptcha(force){
+  if(!force&&captchaLoaded())return;
+  if(++capTries>18){bar('⚠ Captcha still not loading — tap the ↻ button next to the picture, or reload this page (the free host wakes slowly on the first open).');return;}
+  if(!force)bar('⏳ Captcha picture coming slowly — retrying… ('+capTries+')');
+  else bar('⏳ Getting you a fresh captcha picture…');
   fetch('Captcha.ashx?_='+Date.now(),{cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();}).then(function(j){
     var b=j.image||j.Image,t=j.token||j.Token;
     if(!b){throw new Error('empty');}
     var el=document.getElementById('captcha');if(el){el.setAttribute('src',b);}
     try{captchaToken=t;}catch(e){try{window.captchaToken=t;}catch(_){}}
+    var inp=document.getElementById('captcha-input');if(inp){inp.value='';if(force){try{inp.focus();}catch(e){}}}
     window.__capN=(window.__capN||0)+1;
     bar('✅ Captcha picture #'+window.__capN+' loaded (fresh, just now) — type what you see in the box and tap <b>SEARCH</b>.');
-  }).catch(function(){setTimeout(watchCaptcha,2600);});
+  }).catch(function(){if(force){bar('⚠ Could not get a fresh picture just now — tap ↻ once more.');}setTimeout(function(){watchCaptcha();},2600);});
 }
 // The value boxes (#PanNumber / #CDSLContent / #dp_sec / #ApplicationNo) start
 // display:none and their page only reveals them via jQuery change handlers.
@@ -1923,13 +1925,18 @@ function installCapUi(){
   var b=document.createElement('button');b.id='ipoassist-cap';b.type='button';b.title='New captcha picture';
   b.textContent='↻';
   b.style.cssText='display:inline-flex;align-items:center;justify-content:center;width:46px;height:46px;font-size:23px;line-height:1;background:#ffffff;border:2px solid #0b3570;border-radius:9px;margin-left:8px;color:#0b3570;cursor:pointer;vertical-align:middle';
-  b.onclick=function(){capTries=0;watchCaptcha();};
+  b.onclick=function(){capTries=0;watchCaptcha(1);};
   img.parentNode.insertBefore(b,img.nextSibling);
 }
 setTimeout(installCapUi,800);
 // The guidance bar is fixed at the bottom — without padding it literally COVERS
 // the result table's last rows on short screens. Give the page scroll room.
 setTimeout(function(){try{document.body.style.paddingBottom='150px';}catch(e){}},500);
+// The result panel starts as an empty wireframe of labels — it must stay hidden
+// until a REAL result lands (their jQuery / our liteSearch both re-show it);
+// leaving it visible reads like a broken static page.
+setTimeout(function(){try{var dp=document.getElementById('dPrint');
+  if(dp&&!dp.textContent.match(/NON|ALLOTED|[0-9]{3,}/))dp.style.display='none';}catch(e){}},600);
 function go(){var sel=document.getElementById('ddlCompany');
 if(!sel){if(++tries<60)setTimeout(go,300);return;}
 if((sel.options||[]).length<2){if(++tries<60)setTimeout(go,300);return;}
@@ -2044,7 +2051,7 @@ setTimeout(function(){
   var rf=document.getElementById('refresh-captcha');
   if(rf){rf.innerHTML='&#8635;';rf.title='New captcha';
     rf.style.cssText='display:inline-flex;align-items:center;justify-content:center;min-width:42px;min-height:42px;font-size:22px;background:#ffffff;border:1px solid #c8d2dc;border-radius:8px;margin-left:6px;color:#123;cursor:pointer';
-    rf.addEventListener('click',function(){capTries=0;watchCaptcha();});}
+    rf.addEventListener('click',function(){capTries=0;watchCaptcha(1);});}
   var bs=document.getElementById('btn_Search');
   if(bs){bs.addEventListener('click',function(e){if(e.preventDefault)e.preventDefault();
     try{if(window.jQuery){bar('↻ Page scripts just arrived — reloading once so their own SEARCH takes over…');setTimeout(function(){location.reload();},600);return;}}catch(err){}
