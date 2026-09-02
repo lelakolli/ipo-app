@@ -1894,6 +1894,15 @@ function watchCaptcha(){
     bar('✅ Captcha picture loaded — type what you see in the box and tap <b>SEARCH</b>.');
   }).catch(function(){setTimeout(watchCaptcha,2600);});
 }
+// The value boxes (#PanNumber / #CDSLContent / #dp_sec / #ApplicationNo) start
+// display:none and their page only reveals them via jQuery change handlers.
+// We never rely on that: syncVis() mirrors the same show/hide matrix in plain
+// JS, called after every fill AND on any manual dropdown change.
+function syncVis(){var hd=function(id,on){var z=document.getElementById(id);if(z)z.style.display=on?'':'none';};
+ var v='';try{v=(document.getElementById('SelectionType')||{}).value||'';}catch(e){}
+ var t2='';try{t2=(document.getElementById('ddlType')||{}).value||'';}catch(e){}
+ hd('PanNumber',v==='PN');hd('ApplicationNo',v==='AP');hd('BeneficiaryId',v==='BN');
+ hd('CDSLContent',v==='BN'&&t2==='CDSL');hd('dp_sec',v==='BN'&&t2==='NSDL');}
 function go(){var sel=document.getElementById('ddlCompany');
 if(!sel){if(++tries<60)setTimeout(go,300);return;}
 if((sel.options||[]).length<2){if(++tries<60)setTimeout(go,300);return;}
@@ -1907,8 +1916,9 @@ var st=document.getElementById('SelectionType');
 if(st&&F.selType){st.value=F.selType;try{st.dispatchEvent(new Event('change',{bubbles:true}));}catch(e){}}
 var f2='';
 if(F.selType==='PN'&&F.pan){var p=document.getElementById('txtpan');if(p){p.value=F.pan;f2='PAN <b>'+F.pan+'</b> filled';}}
-else if(F.selType==='BN'&&F.cdsl){var ty=document.getElementById('ddlType');if(ty){ty.value='CDSL';}
+else if(F.selType==='BN'&&F.cdsl){var ty=document.getElementById('ddlType');if(ty){ty.value='CDSL';try{ty.dispatchEvent(new Event('change',{bubbles:true}));}catch(e){}}
 var c=document.getElementById('txtcsdl');if(c){c.value=F.cdsl;f2='BO ID <b>'+F.cdsl+'</b> filled';}}
+try{syncVis();}catch(e){}
 var co=sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].text:'';
 bar((okCo?'\u2705 <b>'+co+'</b> selected':'\u26A0 <b>'+(F.companyName||'')+'</b> is <b>not in Bigshare\u2019s dropdown yet</b> — their list shows only <b>'+Math.max(0,(sel.options||[]).length-1)+'</b> live issue(s) right now. Allotment pages usually flip late in the evening — nothing is broken, recheck later tonight. The app\u2019s auto-check also keeps polling the registrar.')
 +'<br>'+(f2?f2+' for <b>'+(F.accName||'')+'</b>.':'No PAN/BO ID stored for <b>'+(F.accName||'')+'</b> \u2014 type it yourself.')
@@ -2014,6 +2024,9 @@ setTimeout(function(){
     liteSearch();});}
   var bc=document.getElementById('btn_clear');
   if(bc){bc.addEventListener('click',function(){location.reload();});}
+  var s0=document.getElementById('SelectionType');if(s0)s0.addEventListener('change',function(){try{syncVis();}catch(e){}});
+  var t0=document.getElementById('ddlType');if(t0)t0.addEventListener('change',function(){try{syncVis();}catch(e){}});
+  try{syncVis();}catch(e){}
   var dp=document.getElementById('dPrint');if(dp&&!dp.textContent.match(/NON|ALLOTED|[0-9]{3,}/)){dp.style.display='none';}
 },3200);
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
