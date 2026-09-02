@@ -17,7 +17,10 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  if (e.request.method !== 'GET' || url.pathname.startsWith('/api/')) return; // always network
+  // /bs/* is the proxied registrar assist: captcha/search/assets must ALWAYS
+  // go to the network (a cached captcha JSON = stale token = broken checks),
+  // and caching them unboundedly grows the Cache API store with junk.
+  if (e.request.method !== 'GET' || url.pathname.startsWith('/api/') || url.pathname.startsWith('/bs/')) return; // always network
 
   const isPage = e.request.mode === 'navigate' || url.pathname === '/' || url.pathname.endsWith('.html');
   if (isPage) {

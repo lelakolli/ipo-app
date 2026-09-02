@@ -1929,6 +1929,17 @@ function installCapUi(){
   img.parentNode.insertBefore(b,img.nextSibling);
 }
 setTimeout(installCapUi,800);
+// SEARCH: ONE code path for everyone, bound in the capture phase. Their own
+// handler lives inside jQuery — and on this user's devices that dependency has
+// failed in three different ways (dead button; the old "self-heal" guard
+// silently reloading the page mid-tap; CDN stalls). We stop any other handler
+// and run the exact same request contract ourselves.
+(function(){var bs0=document.getElementById('btn_Search');
+if(bs0){bs0.addEventListener('click',function(e){
+  if(e.preventDefault)e.preventDefault();
+  if(e.stopImmediatePropagation)e.stopImmediatePropagation();
+  liteSearch();
+},true);}})();
 // The guidance bar is fixed at the bottom — without padding it literally COVERS
 // the result table's last rows on short screens. Give the page scroll room.
 setTimeout(function(){try{document.body.style.paddingBottom='150px';}catch(e){}},500);
@@ -2005,11 +2016,13 @@ allotment:allotted?'allotted':'not_allotted',allotted_qty:allotted?qty:0})})
 // ---------------------------------------------------------------------------
 function gv(id){var e=document.getElementById(id);return e?(e.value||''):'';}
 function st(id,v){var e=document.getElementById(id);if(e)e.textContent=(v==null?'':String(v));}
+var searchBusy=false;
 function liteSearch(){
+  if(searchBusy)return;searchBusy=true;
   var co=gv('ddlCompany'),st0=gv('SelectionType'),ans=gv('captcha-input');
-  if(!co||co==='--Select Company--'||co==='0'){bar('⚠ Pick the company from the list first.');return;}
+  if(!co||co==='--Select Company--'||co==='0'){searchBusy=false;bar('⚠ Pick the company from the list first.');return;}
   var tok='';try{tok=captchaToken||'';}catch(e){try{tok=window.captchaToken||'';}catch(_){}}
-  if(!tok||!ans){bar('⚠ Type the CODE from the captcha picture first.');if(!tok){capTries=0;watchCaptcha();}return;}
+  if(!tok||!ans){searchBusy=false;bar('⚠ Type the CODE from the captcha picture first.');if(!tok){capTries=0;watchCaptcha();}return;}
   var payload={Applicationno:gv('txtapplication'),Company:co,SelectionType:st0,PanNo:gv('txtpan'),
     txtcsdl:gv('txtcsdl'),txtDPID:gv('txtDPID'),txtClId:gv('txtClId'),ddlType:gv('ddlType'),
     lang:gv('ddllang'),CaptchaToken:tok,CaptchaAnswer:ans,ResultToken:''};
@@ -2017,6 +2030,7 @@ function liteSearch(){
   fetch('Data.aspx/FetchIpodetails',{method:'POST',headers:{'Content-Type':'application/json; charset=utf-8'},body:JSON.stringify(payload)})
   .then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();})
   .then(function(d){
+    searchBusy=false;
     var C=(d&&d.d)||{};var cs=C.Status||'';
     if(C.ResultToken){try{resultToken=C.ResultToken;}catch(e){try{window.resultToken=C.ResultToken;}catch(_){}}}
     if(cs&&cs!=='OK'&&cs!=='NOTFOUND'){
@@ -2042,7 +2056,7 @@ function liteSearch(){
     var sc=document.getElementById('dPrint');if(sc){try{sc.scrollIntoView({block:'center'});}catch(e){}}
     bar('✅ Result is on screen — send it back with ONE tap:');
   })
-  .catch(function(e){bar('⚠ Search failed ('+e.message+') — tap SEARCH again.');});
+  .catch(function(e){searchBusy=false;bar('⚠ Search failed ('+e.message+') — tap SEARCH again.');});
 }
 setTimeout(function(){
   try{watchCaptcha();}catch(e){}
@@ -2052,10 +2066,6 @@ setTimeout(function(){
   if(rf){rf.innerHTML='&#8635;';rf.title='New captcha';
     rf.style.cssText='display:inline-flex;align-items:center;justify-content:center;min-width:42px;min-height:42px;font-size:22px;background:#ffffff;border:1px solid #c8d2dc;border-radius:8px;margin-left:6px;color:#123;cursor:pointer';
     rf.addEventListener('click',function(){capTries=0;watchCaptcha(1);});}
-  var bs=document.getElementById('btn_Search');
-  if(bs){bs.addEventListener('click',function(e){if(e.preventDefault)e.preventDefault();
-    try{if(window.jQuery){bar('↻ Page scripts just arrived — reloading once so their own SEARCH takes over…');setTimeout(function(){location.reload();},600);return;}}catch(err){}
-    liteSearch();});}
   var bc=document.getElementById('btn_clear');
   if(bc){bc.addEventListener('click',function(){location.reload();});}
   var s0=document.getElementById('SelectionType');if(s0)s0.addEventListener('change',function(){try{syncVis();}catch(e){}});
