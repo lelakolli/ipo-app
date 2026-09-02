@@ -455,19 +455,73 @@ def vapid_keys():
     return VAPID_PUB, VAPID_PRIV
 
 
-def send_push(title: str, body: str = "", url: str = "/"):
-    """Fire a push notification to every subscribed device. Never raises."""
+# ---- notification manners (fix #12): five pushers used to fire independently,
+# 24x7, with no clock, no pacing and no "is this NEW?" check. One traffic cop now
+# stands between every pusher and the phone:
+#   🌙 quiet hours 22:00-07:00 IST  — automatic pushes are HELD and flushed as a
+#      single combined digest when quiet hours end (true silence overnight)
+#   ⏱ pacing                       — max 1 automatic push per 45 min, 8/day
+#      ("urgent" = fresh allotment verdicts skip the gap, still capped)
+#   🧾 data_check findings never push — in-app drawer only
+# kind="test" (the manual settings-page button) bypasses every rule.
+QUIET_START = 22 * 60          # 10:00 PM IST
+QUIET_END = 7 * 60             # 7:00 AM IST
+PUSH_MIN_GAP = 45 * 60         # seconds between automatic pushes
+PUSH_DAILY_CAP = 8             # automatic pushes per day, hard stop
+PUSH_NO_PUSH_KINDS = ("data_check",)   # ARTHAN hygiene findings: drawer-only
+
+
+def _quiet_now() -> bool:
+    n = ist_now()
+    hm = n.hour * 60 + n.minute
+    return hm >= QUIET_START or hm < QUIET_END
+
+
+def _push_gate(kind: str, title: str) -> bool:
+    """True = the push may go out now. Automatic pushes during quiet hours are
+    remembered (push_held) and flushed as one digest at the end of quiet hours."""
+    if push_prefs().get("quiet", True) and _quiet_now():
+        held = json.loads(kv_get("push_held", "[]") or "[]")
+        held.append({"t": title})
+        kv_set("push_held", json.dumps(held[-12:]))
+        print(f"[push] held overnight: {title[:50]}", flush=True)
+        return False
+    st = json.loads(kv_get("push_pace", "{}") or "{}")
+    today = ist_now().date().isoformat()
+    if st.get("day") != today:
+        st = {"day": today, "n": 0, "last": 0.0}
+    n_today, last_at = int(st.get("n", 0)), float(st.get("last", 0))
+    if kind == "urgent":
+        if n_today >= PUSH_DAILY_CAP + 4:      # verdicts get slack, not infinity
+            print(f"[push] urgent capped for today: {title[:50]}", flush=True)
+            return False
+    elif n_today >= PUSH_DAILY_CAP or time.time() - last_at < PUSH_MIN_GAP:
+        print(f"[push] paced/capped ({n_today} today): {title[:50]}", flush=True)
+        return False
+    kv_set("push_pace", json.dumps({"day": today, "n": n_today + 1, "last": time.time()}))
+    return True
+
+
+def send_push(title: str, body: str = "", url: str = "/", kind: str = "auto"):
+    """Fire a push notification to every subscribed device. Never raises.
+    kind: 'test' (manual tap — no rules) / 'urgent' (fresh verdict — skips the
+    45-min gap, respects quiet hours + a slack cap) / 'auto' (all rules)."""
+    if kind != "test" and not _push_gate(kind, title):
+        return False
     try:
         from pywebpush import webpush
     except ImportError:
         print("[push] pywebpush not installed — skipping", flush=True)
-        return
+        return False
     subs = rows("SELECT * FROM push_subs")
+    # stable per-title tag: a re-sent alert REPLACES itself in the shade
+    # instead of stacking (distinct alerts still stack separately)
+    tag = "ipo-" + re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:40]
     dead = []
     for s in subs:
         try:
             webpush(subscription_info=json.loads(s["sub_json"]),
-                    data=json.dumps({"title": title, "body": body, "url": url}),
+                    data=json.dumps({"title": title, "body": body, "url": url, "tag": tag}),
                     vapid_private_key=vapid_keys()[1],
                     vapid_claims={"sub": VAPID_SUB}, timeout=12)
         except Exception as e:
@@ -478,6 +532,20 @@ def send_push(title: str, body: str = "", url: str = "/"):
         run("DELETE FROM push_subs WHERE id=?", (i,))
     if subs:
         print(f"[push] sent to {len(subs) - len(dead)}/{len(subs)} devices: {title[:40]}", flush=True)
+    return bool(subs)
+
+
+def flush_held_pushes():
+    """Morning digest: everything held during quiet hours goes out as ONE push."""
+    if not push_prefs().get("quiet", True) or _quiet_now():
+        return
+    held = json.loads(kv_get("push_held", "[]") or "[]")
+    if not held:
+        return
+    kv_set("push_held", "[]")
+    body = " • ".join(h["t"][:42] for h in held[:4]) + ("…" if len(held) > 4 else "")
+    send_push(f"🌅 {len(held)} overnight update{'s' if len(held) > 1 else ''}",
+              body, kind="urgent")
 
 # ----------------------------------------------------------------------------
 # helpers
@@ -1543,8 +1611,8 @@ CONF_FILE = DATA / "config.json"
 if CONF_FILE.exists():
     CONF = json.loads(CONF_FILE.read_text())
 else:
-    CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}
-    print(f"[FIRST-RUN PASSCODE] {CONF['passcode']} — change it in the app (Dashboard -> App passcode).", flush=True)
+    CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}  # randomized on every boot for the public mirror
+    print(f"[boot] FIRST-RUN PASSCODE for this deploy: {CONF['passcode']}", flush=True)
     try:
         CONF_FILE.write_text(json.dumps(CONF))
     except Exception:
@@ -2725,7 +2793,7 @@ def push_test():
     subs = rows("SELECT COUNT(*) c FROM push_subs")[0]["c"]
     if not subs:
         raise HTTPException(400, "no subscribed devices — tap 'Enable phone alerts' on your phone first")
-    send_push("🔔 IPO Center", "Notifications are ON — you'll get allotment & mandate alerts here.")
+    send_push("🔔 IPO Center", "Notifications are ON — you'll get allotment & mandate alerts here.", kind="test")
     return {"ok": True, "devices": subs}
 
 
@@ -3404,6 +3472,7 @@ def run_allotment_checks(ipo: dict, force: bool = False) -> list:
                    WHERE a.ipo_id=? AND a.applied=1""", (ipo["id"],))
     results = []
     for a in apps:
+        was_pending = a["allotment"] not in ("allotted", "not_allotted")
         if engine is None:
             res = {"status": "manual", "note": "Unknown registrar — check manually", "link": REGISTRAR_LINKS.get(ipo["registrar"], "")}
         else:
@@ -3425,7 +3494,12 @@ def run_allotment_checks(ipo: dict, force: bool = False) -> list:
             run("UPDATE applications SET checked_note=?, updated_at=datetime('now','localtime') WHERE id=?",
                 (res.get("note", ""), a["id"]))
         results.append({"application_id": a["id"], "account_id": a["account_id"],
-                        "holder": a["holder"], **{k: res.get(k) for k in
+                        "holder": a["holder"],
+                        # fix #12: a verdict counts as push-worthy exactly once —
+                        # the sweep re-checks decided rows every cycle, and without
+                        # this flag the phone re-rings with news it already told
+                        "newly": bool(res.get("status") in ("ok", "not_found") and was_pending),
+                        **{k: res.get(k) for k in
                         ("status", "allotted_qty", "note", "link", "matched_company") if res.get(k) is not None}})
     return results
 
@@ -3433,14 +3507,14 @@ def run_allotment_checks(ipo: dict, force: bool = False) -> list:
 def notify_alotment_result(ipo: dict, results: list):
     if not push_prefs().get("allotment", True):
         return
-    decided = [r for r in results if r.get("status") in ("ok", "not_found")]
+    decided = [r for r in results if r.get("status") in ("ok", "not_found") and r.get("newly")]
     if not decided:
         return
-    wins = [r for r in results if r.get("status") == "ok"]
+    wins = [r for r in decided if r.get("status") == "ok"]
     body = ("✅ " + "; ".join(f"{r['holder']} {r.get('allotted_qty') or ''}sh" for r in wins)) if wins \
         else "No allotments this time — refunds will unblock in 1–2 days."
     send_push(f"📢 {ipo['name'][:28]} — allotment out!",
-              f"{body}  ({len(wins)}/{len(results)} allotted)")
+              f"{body}  ({len(wins)}/{len(decided)} allotted)", kind="urgent")
 
 
 @app.post("/api/ipos/{iid}/check_allotment")
@@ -3582,6 +3656,17 @@ def kv_set(k, v):
     run("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
 
 
+def _alert_key(a: dict) -> str:
+    """Push dedupe key. fix #12: allotment-due and TPIN alerts key on the IPO
+    only — their detail carries a live pending-count / holder list, and every
+    change used to mint a brand-new key → a fresh push every 15 min while the
+    user was actively working through 15 accounts. One reminder per IPO ever;
+    the live count stays visible in the in-app alert drawer."""
+    if a.get("kind") in ("allotment", "tpin"):
+        return f"{a['kind']}|{a.get('ipo_id')}"
+    return f"{a['kind']}|{a['title']}|{a['detail']}"
+
+
 def push_new_alerts():
     """Push high-severity alerts to subscribed phones (diffed against seen set)."""
     if not rows("SELECT 1 x FROM push_subs LIMIT 1"):
@@ -3590,15 +3675,16 @@ def push_new_alerts():
     prev = kv_get("seen_alerts")
     seen = set(json.loads(prev)) if prev else set()
     if prev is None:
-        kv_set("seen_alerts", json.dumps(sorted({f"{a['kind']}|{a['title']}|{a['detail']}" for a in alerts})))
+        kv_set("seen_alerts", json.dumps(sorted({_alert_key(a) for a in alerts})))
         return  # first run: seed without spamming
     fresh = []
     allow_push = push_prefs().get("high_alert", True)
     for a in alerts:
-        key = f"{a['kind']}|{a['title']}|{a['detail']}"
+        key = _alert_key(a)
         if key not in seen:
             seen.add(key)
-            if allow_push and a.get("sev") == "high":
+            if (allow_push and a.get("sev") == "high"
+                    and a.get("kind") not in PUSH_NO_PUSH_KINDS):
                 fresh.append(a)
     kv_set("seen_alerts", json.dumps(sorted(seen)[-400:]))
     if not fresh:
@@ -3611,7 +3697,8 @@ def push_new_alerts():
 
 
 PUSH_PREF_DEFAULT = {"allotment": True, "close_today": True, "mandate": True,
-                     "listing": True, "gmp_swing": True, "high_alert": True}
+                     "listing": True, "gmp_swing": True, "high_alert": True,
+                     "quiet": True}
 
 
 def push_prefs():
@@ -3780,9 +3867,11 @@ def scheduler():
                 except Exception as e:
                     print("[sched] auto-allotment error:", e, flush=True)
                 last["auto"] = now
-            # push new high-severity alerts to phones
+            # push new high-severity alerts to phones (+ flush anything held
+            # overnight now that quiet hours have ended)
             if now - last["push"] > 15 * 60:
                 try:
+                    flush_held_pushes()
                     push_new_alerts()
                 except Exception as e:
                     print("[sched] push-alerts error:", e, flush=True)

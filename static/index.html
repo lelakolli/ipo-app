@@ -285,6 +285,7 @@ main{padding-bottom:8px}
       <span class="mut" style="font-size:10.5px">saved on server • applies to all your devices</span>
     </div>
     <div id="notif-prefs" class="mut" style="font-size:12px;padding-top:6px">loading…</div>
+    <div class="mut" style="font-size:10.5px;padding-top:7px">🧘 Manners always on: repeat alerts replace themselves • max 1 push / 45 min • max 8 / day • allotment repeats are never re-sent</div>
   </div>
 </div>
 <div id="toast"></div>
@@ -1257,12 +1258,13 @@ window.enableNotifs=async()=>{
   }catch(e){toast('Live alerts ON in-app; background push failed: '+e.message,1);}
   updateNotifBtn();};
 const NOTIF_CATS=[
- ['allotment','📢 Allotment results','the moment an allotment verdict is found'],
+ ['allotment','📢 Allotment results','the moment a NEW allotment verdict is found'],
  ['close_today','⏰ Closes today','morning reminder for IPOs closing today'],
  ['mandate','⏳ Mandates pending','evening nag if UPI mandates are unapproved'],
  ['listing','🔔 Listing tomorrow','evening heads-up with your expected position'],
  ['gmp_swing','📈 GMP sharp moves',"≥20% jumps on IPOs you've applied in"],
  ['high_alert','⚠️ Important alerts','data verification divergences & critical checks'],
+ ['quiet','🌙 Quiet hours (10 PM – 7 AM)','total silence overnight — anything that happens is held and sent as one morning digest'],
 ];
 let NP={};
 async function loadNotifPrefs(){

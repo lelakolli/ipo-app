@@ -62,7 +62,9 @@ self.addEventListener('push', (e) => {
     icon: '/static/icons/icon-512.png',
     badge: '/static/icons/icon-512.png',
     data: { url: d.url || '/' },
-    tag: 'ipo-' + Date.now(),
+    // fix #12: server sends a stable per-title tag — a repeated alert REPLACES
+    // itself in the shade instead of stacking into a wall of cards
+    tag: d.tag || 'ipo-center',
   }));
 });
 
