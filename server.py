@@ -115,6 +115,39 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
         CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT DEFAULT '');
+        -- profit-share partner (fix #13): partner supplies HIS UPI IDs for
+        -- applications (ASBA blocks/unblocks in HIS banks — money never passes
+        -- through the user's hands); a per-IPO profit share % applies to the
+        -- applications filed with those UPI IDs; settlements are ONE direction
+        -- only (user -> partner) after the listing-day sale.
+        CREATE TABLE IF NOT EXISTS friends(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            note TEXT DEFAULT '',
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE TABLE IF NOT EXISTS friend_vpas(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
+            vpa TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS friend_ipo_pct(
+            friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
+            ipo_id INTEGER NOT NULL REFERENCES ipos(id) ON DELETE CASCADE,
+            pct REAL NOT NULL,
+            updated_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(friend_id, ipo_id)
+        );
+        CREATE TABLE IF NOT EXISTS friend_settlements(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
+            ipo_id INTEGER NOT NULL REFERENCES ipos(id) ON DELETE CASCADE,
+            amount REAL NOT NULL,
+            paid_on TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
         CREATE TABLE IF NOT EXISTS gmp_hist(
             ipo_id INTEGER NOT NULL,
             day TEXT NOT NULL,
@@ -157,7 +190,8 @@ import arthan  # noqa: E402 — market-intelligence engine (self-verifying IPO d
 # from GitHub, then local file, then the seed backup that ships in the repo.
 # ----------------------------------------------------------------------------
 
-BACKUP_TABLES = ("accounts", "ipos", "applications", "push_subs", "kv")
+BACKUP_TABLES = ("accounts", "ipos", "applications", "push_subs", "kv",
+                 "friends", "friend_vpas", "friend_ipo_pct", "friend_settlements")
 # mirror paths follow the DB location (identical in production — DB lives in
 # DATA — but a test box pointing IPO_DB elsewhere no longer inherits the
 # production mirror file as its "local backup" restore source)
@@ -1483,15 +1517,24 @@ def compute_alerts():
     apps = rows("""SELECT a.*, ac.holder, ac.auth_mode FROM applications a
                    JOIN accounts ac ON ac.id=a.account_id WHERE a.applied=1""")
     nm = {i["id"]: i for i in ipos}
+    # partner UPI map for mandate nudges: when the pending mandate sits on the
+    # PARTNER's UPI ID, the reminder must say whom to ping (fix #13)
+    try:
+        _pfrs, _pvpa, _ = _partner_maps()
+        _pfname = {f["id"]: f["name"] for f in _pfrs}
+    except Exception:
+        _pvpa, _pfname = {}, {}
     for a in apps:
         ipo = nm.get(a["ipo_id"])
         if not ipo:
             continue
         in_window = (ipo.get("open_date") or "9999") <= t <= (ipo.get("close_date") or "")
         if a["mandate_status"] == "pending" and in_window:
+            _pf = _pvpa.get((a.get("upi") or "").strip().lower())
+            partner_tag = f" • on {_pfname[_pf]}'s UPI — ask him to approve" if _pf in _pfname else ""
             alerts.append({"sev": "high", "kind": "mandate", "ipo_id": ipo["id"],
                            "title": "UPI mandate pending",
-                           "detail": f"{a['holder']} — {ipo['name']} • ₹{a['amount']:,.0f}"})
+                           "detail": f"{a['holder']} — {ipo['name']} • ₹{a['amount']:,.0f}{partner_tag}"})
         if a["allotment"] == "not_allotted" and a["refund"] == "pending":
             alerts.append({"sev": "med", "kind": "refund", "ipo_id": ipo["id"],
                            "title": "Refund/unblock pending",
@@ -2886,16 +2929,237 @@ def state():
             kick_gmp_refresh("app open")
     except Exception as e:
         print("[gmp kick] freshness check failed:", e, flush=True)
+    # partner money surface for the dashboard pill (full detail: GET /api/partner)
+    try:
+        _ps = partner_summary()
+        partner_state = {"configured": bool(_ps["friends"]),
+                         "pending_total": _ps["pending_total"], "pending_n": _ps["pending_n"]}
+    except Exception as e:
+        print("[partner] state summary failed:", e, flush=True)
+        partner_state = {"configured": False, "pending_total": 0.0, "pending_n": 0}
     return {
         "accounts": rows("SELECT * FROM accounts ORDER BY sort, holder, id"),
         "gmp_age_s": min((_ist_age_seconds(i.get("mkt_at") or "") for i in ipos if i.get("mkt_at")), default=None),
         "ipos": ipos,
         "applications": rows("SELECT * FROM applications"),
         "charges": charges_store(),
+        "partner": partner_state,
         "today": today_str(),
         "mobile": mobile_info(),
         "backup_at": _bak_last_ok,  # visible save pulse ("" until first write of this boot)
     }
+
+
+# ----------------------------------------------------------------------------
+# profit-share partner (fix #13). Model (confirmed by the user):
+#  • partner supplies HIS UPI IDs; applications are filed with them, ASBA money
+#    blocks/unblocks in HIS banks — no capital ever passes through the user
+#  • per-IPO profit share % (default 50, editable anytime, whole-IPO basis)
+#  • everything is sold on listing day; losses share at the same %
+#  • settlement: ONE direction (user → partner), after the listing-day sale:
+#        due = partner_invested + pct% × partner_booked_pnl
+#    computed with the SAME per-application math as the app's own P&L views
+#    (cost/share = amount/allotted_qty; booked = (sell_price−cost)×sell_qty)
+#  • pre-listing, the share shows as "accruing" at CMP — payable triggers on
+#    the first sell entry (partner's capital is his until the refund unblocks
+#    back in HIS bank, so non-allotments need no tracking at all)
+# ----------------------------------------------------------------------------
+DEFAULT_PARTNER_PCT = 50.0
+
+
+def _partner_maps():
+    frs = rows("SELECT * FROM friends WHERE active=1 ORDER BY name, id")
+    vpa_map = {}          # lowercased vpa -> friend_id (auto-detects partner funding)
+    for v in rows("SELECT fv.friend_id, fv.vpa FROM friend_vpas fv JOIN friends f ON f.id=fv.friend_id"):
+        vpa_map[(v["vpa"] or "").strip().lower()] = v["friend_id"]
+    pct_map = {(p["friend_id"], p["ipo_id"]): p["pct"]
+               for p in rows("SELECT friend_id, ipo_id, pct FROM friend_ipo_pct")}
+    return frs, vpa_map, pct_map
+
+
+def _a_pnl_split(a: dict, cmp_: float):
+    """Mirror the frontend's bookedPnl/unrealPnl for one application."""
+    qty = a["allotted_qty"] or 0
+    base = qty if qty > 0 else (a["sell_qty"] or 0)
+    cost = (a["amount"] or 0) / base if base > 0 else 0.0
+    sold = (a["sell_qty"] or 0) if a["allotment"] == "allotted" else 0
+    booked = ((a["sell_price"] or 0) - cost) * sold if sold > 0 else 0.0
+    open_q = max(0, qty - (a["sell_qty"] or 0))
+    accr = ((cmp_ or 0) - cost) * open_q if (a["allotment"] == "allotted" and cmp_ and open_q > 0) else 0.0
+    return booked, accr
+
+
+def partner_summary(ipo_id: int = None) -> dict:
+    frs, vpa_map, pct_map = _partner_maps()
+    friends_out = []
+    for f in frs:
+        friends_out.append({**f,
+                            "vpas": rows("SELECT id, vpa FROM friend_vpas WHERE friend_id=? ORDER BY id",
+                                         (f["id"],))})
+    base = {"friends": friends_out, "default_pct": DEFAULT_PARTNER_PCT,
+            "ipos": [], "pending_total": 0.0, "pending_n": 0}
+    if not frs:
+        return base
+    fids = {f["id"] for f in frs}
+    ipos = rows("SELECT * FROM ipos" + (" WHERE id=?" if ipo_id else ""),
+                (ipo_id,) if ipo_id else ())
+    ptot, pn = 0.0, 0
+    for i in ipos:
+        apps = rows("SELECT * FROM applications WHERE ipo_id=? AND applied=1", (i["id"],))
+        inv_by, book_by, acr_by, sold_by = {}, {}, {}, {}
+        for a in apps:
+            fid = vpa_map.get((a.get("upi") or "").strip().lower())
+            if not fid or fid not in fids:
+                continue
+            if a["allotment"] != "allotted":
+                continue  # partner money simply unblocks back in HIS bank
+            b, ar = _a_pnl_split(a, i.get("cmp"))
+            inv_by[fid] = inv_by.get(fid, 0.0) + (a["amount"] or 0)
+            book_by[fid] = book_by.get(fid, 0.0) + b
+            acr_by[fid] = acr_by.get(fid, 0.0) + ar
+            if (a["sell_qty"] or 0) > 0:
+                sold_by[fid] = True
+        for f in frs:
+            override = pct_map.get((f["id"], i["id"]))
+            involved = f["id"] in inv_by or (f["id"] in acr_by and acr_by[f["id"]] != 0) or f["id"] in book_by
+            if not involved and override is None:
+                continue
+            pct = float(override) if override is not None else DEFAULT_PARTNER_PCT
+            inv = inv_by.get(f["id"], 0.0)
+            book = book_by.get(f["id"], 0.0)
+            acr = acr_by.get(f["id"], 0.0)
+            due = round(inv + pct / 100.0 * book)
+            paid = rows("""SELECT COALESCE(SUM(amount),0) s FROM friend_settlements
+                            WHERE friend_id=? AND ipo_id=?""", (f["id"], i["id"]))[0]["s"] or 0.0
+            pend = round(due - paid, 2)
+            sold_any = bool(sold_by.get(f["id"]))
+            # payable nags begin only once something is actually sold (that's
+            # when proceeds hit the user's banks). Before that: "accruing".
+            counts = sold_any
+            base["ipos"].append({
+                "ipo_id": i["id"], "name": i["name"], "listing_date": i.get("listing_date") or "",
+                "status": ipo_status(i), "friend_id": f["id"], "friend": f["name"],
+                "pct": pct, "override": override is not None,
+                "invested": round(inv, 2), "booked": round(book, 2),
+                "friend_share": round(pct / 100.0 * book, 2),
+                "my_share": round((100.0 - pct) / 100.0 * book, 2),
+                "est_accr_friend": round(pct / 100.0 * acr, 2),
+                "due": due, "paid": round(paid, 2),
+                "pending": max(0.0, pend) if counts else 0.0,
+                "state": ("settled" if (due > 0 and pend <= 0.5 and counts)
+                          else ("payable" if counts else "accruing"))})
+            if counts and pend > 0.5:
+                ptot += pend
+                pn += 1
+    base["ipos"].sort(key=lambda r: (0 if r["state"] == "payable" else (1 if r["state"] == "accruing" else 2),
+                                     r["listing_date"] or "9999", r["ipo_id"]), reverse=False)
+    base["pending_total"] = round(ptot, 2)
+    base["pending_n"] = pn
+    return base
+
+
+@app.get("/api/partner")
+def api_partner():
+    return partner_summary()
+
+
+@app.post("/api/partner/friends")
+def api_friend_add(b: dict = Body(...)):
+    name = (b.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "Name required")
+    run("INSERT INTO friends(name, note) VALUES(?,?)", (name, (b.get("note") or "").strip()))
+    backup_now()
+    return partner_summary()
+
+
+@app.put("/api/partner/friends/{fid}")
+def api_friend_update(fid: int, b: dict = Body(...)):
+    f = rows("SELECT * FROM friends WHERE id=?", (fid,))
+    if not f:
+        raise HTTPException(404, "friend not found")
+    f = f[0]
+    run("UPDATE friends SET name=?, note=?, active=? WHERE id=?",
+        ((b.get("name") or f["name"]).strip(), b.get("note", f["note"]),
+         1 if b.get("active", f["active"]) else 0, fid))
+    backup_now()
+    return partner_summary()
+
+
+@app.post("/api/partner/friends/{fid}/vpas")
+def api_vpa_add(fid: int, b: dict = Body(...)):
+    if not rows("SELECT 1 x FROM friends WHERE id=?", (fid,)):
+        raise HTTPException(404, "friend not found")
+    vpa = (b.get("vpa") or "").strip().lower()
+    if not vpa or "@" not in vpa:
+        raise HTTPException(400, "Enter a full UPI ID like name@okhdfc")
+    if rows("SELECT 1 x FROM friend_vpas WHERE vpa=?", (vpa,)):
+        raise HTTPException(400, "This UPI ID is already saved")
+    run("INSERT INTO friend_vpas(friend_id, vpa) VALUES(?,?)", (fid, vpa))
+    backup_now()
+    return partner_summary()
+
+
+@app.delete("/api/partner/friends/{fid}/vpas/{vid}")
+def api_vpa_del(fid: int, vid: int):
+    run("DELETE FROM friend_vpas WHERE id=? AND friend_id=?", (vid, fid))
+    backup_now()
+    return partner_summary()
+
+
+@app.post("/api/partner/pct")
+def api_pct_set(b: dict = Body(...)):
+    fid, iid = int(b.get("friend_id") or 0), int(b.get("ipo_id") or 0)
+    if not rows("SELECT 1 x FROM friends WHERE id=?", (fid,)):
+        raise HTTPException(404, "friend not found")
+    if not rows("SELECT 1 x FROM ipos WHERE id=?", (iid,)):
+        raise HTTPException(404, "ipo not found")
+    pct = b.get("pct")
+    if pct is None:   # clear the IPO-specific override → back to the default
+        run("DELETE FROM friend_ipo_pct WHERE friend_id=? AND ipo_id=?", (fid, iid))
+    else:
+        pct = float(pct)
+        if not (0.0 <= pct <= 100.0):
+            raise HTTPException(400, "Share % must be between 0 and 100")
+        run("""INSERT INTO friend_ipo_pct(friend_id, ipo_id, pct, updated_at)
+               VALUES(?,?,?, datetime('now','localtime'))
+               ON CONFLICT(friend_id, ipo_id) DO UPDATE SET pct=excluded.pct,
+               updated_at=excluded.updated_at""", (fid, iid, pct))
+    backup_now()
+    return partner_summary()
+
+
+@app.post("/api/partner/settle")
+def api_settle(b: dict = Body(...)):
+    fid, iid = int(b.get("friend_id") or 0), int(b.get("ipo_id") or 0)
+    amount = float(b.get("amount") or 0)
+    if amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+    cur = next((r for r in partner_summary(iid)["ipos"] if r["friend_id"] == fid), None)
+    if not cur:
+        raise HTTPException(400, "No partner share found for this IPO")
+    open_due = cur["due"] - cur["paid"]
+    if amount > open_due + 0.5:
+        raise HTTPException(400, f"Only ₹{open_due:,.0f} is pending for this IPO — can't over-settle")
+    run("""INSERT INTO friend_settlements(friend_id, ipo_id, amount, paid_on, note)
+           VALUES(?,?,?,?,?)""",
+        (fid, iid, amount, (b.get("paid_on") or today_str()), (b.get("note") or "").strip()[:120]))
+    backup_now()
+    return partner_summary()
+
+
+@app.delete("/api/partner/settle/{sid}")
+def api_settle_del(sid: int):
+    run("DELETE FROM friend_settlements WHERE id=?", (sid,))
+    backup_now()
+    return partner_summary()
+
+
+@app.get("/api/partner/settlements")
+def api_settle_list():
+    return rows("""SELECT s.*, f.name friend, i.name ipo_name FROM friend_settlements s
+                    JOIN friends f ON f.id=s.friend_id JOIN ipos i ON i.id=s.ipo_id
+                    ORDER BY s.id DESC LIMIT 40""")
 
 
 # ---- accounts ----

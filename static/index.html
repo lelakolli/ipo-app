@@ -258,6 +258,7 @@ main{padding-bottom:8px}
     <button data-tab="market" data-ic="💹">Market</button>
     <button data-tab="accounts" data-ic="👥">Accounts</button>
     <button data-tab="pnl" data-ic="💰">P&amp;L</button>
+    <button data-tab="partner" data-ic="🤝">Partner</button>
   </nav>
 <main>
   <section id="tab-dash"></section>
@@ -266,6 +267,7 @@ main{padding-bottom:8px}
   <section id="tab-apps" style="display:none"></section>
   <section id="tab-accounts" style="display:none"></section>
   <section id="tab-pnl" style="display:none"></section>
+  <section id="tab-partner" style="display:none"></section>
 </main>
 
 <div class="modal-bg" id="modal-bg"><div class="modal" id="modal"></div></div>
@@ -322,6 +324,7 @@ const unrealPnl=(a,ipo)=>a.allotment==='allotted'?( (ipo.cmp||0)-costPerShare(a)
 async function refresh(){S=await api('/api/state');
   document.getElementById('hdr-counts').textContent=`${S.accounts.filter(a=>a.active).length} accounts • ${S.ipos.filter(i=>i.status==='open').length} IPOs open`;
   const hb=document.getElementById('hdr-backup');if(hb)hb.textContent=S.backup_at?('💾 saved '+S.backup_at.slice(11,16)):'💾 —';
+  if(S.partner&&S.partner.configured)loadPartner();else{PT=null;PSH=null;} // non-blocking; tab re-draws itself
   render();}
 // After a one-tap write: (1) if the reload fails (network blip), SAY SO — a
 // stale screen must never look like "the save didn't happen"; (2) PROVE the
@@ -345,8 +348,9 @@ document.querySelectorAll('nav button[data-tab]').forEach(b=>b.onclick=()=>{curT
   document.getElementById('tab-'+curTab).style.display='block';render();});
 
 function render(){
-  ({dash:renderDash,ipos:renderIpos,market:renderMarket,apps:renderApps,accounts:renderAccounts,pnl:renderPnl})[curTab]();
+  ({dash:renderDash,ipos:renderIpos,market:renderMarket,apps:renderApps,accounts:renderAccounts,pnl:renderPnl,partner:renderPartner})[curTab]();
 }
+window.goTab=t=>{const b=document.querySelector('nav button[data-tab="'+t+'"]');if(b)b.click();};
 
 // ---------- MARKET (self-verifying GMP / subscription intelligence) ----------
 let MKT=null, mktSub='gmp', mktSnap=null, mktSnapId=null;
@@ -483,6 +487,8 @@ function renderDash(){
   if(rfp.length)pills.push({ic:'🔓',t:`${rfp.length} refunds pending`,s:kr(rfp.reduce((s,a)=>s+a.amount,0))+' to unblock',act:`goApps(${rfp[0].ipo_id})`});
   const mp=apps.filter(a=>a.mandate_status==='pending'&&(ipoById(a.ipo_id)||{}).status==='open');
   if(mp.length)pills.push({ic:'⏳',t:`${mp.length} UPI mandates waiting`,s:'approve on the phones — tap to open',cls:'neg',act:`goApps(${mp[0].ipo_id})`});
+  // 🤝 partner settlements due (listing-day sales done, money in hand)
+  if(S.partner&&S.partner.pending_total>0.5)pills.push({ic:'🤝',t:`Pay partner ${kr(Math.round(S.partner.pending_total))}`,s:`${S.partner.pending_n} IPO settlement${S.partner.pending_n>1?'s':''} due`,cls:'neg',act:`goTab('partner')`});
   const todayStrip=pills.length?`<div class="mut" style="font-size:11.5px;font-weight:700;letter-spacing:.6px;margin:4px 0 6px">📌 ACT NOW — money items</div>
     <div style="display:flex;gap:8px;overflow-x:auto;padding:0 0 10px;-webkit-overflow-scrolling:touch">${
     pills.map(p=>`<div class="tpill ${p.cls||''}" ${p.act?`onclick="${p.act}"`:''}><span style="font-size:20px">${p.ic}</span><span><div style="font-size:13px;font-weight:600;white-space:nowrap">${p.t}</div><div class="mut" style="font-size:11px;white-space:nowrap">${p.s}</div></span></div>`).join('')}</div>`:'';
@@ -1316,6 +1322,140 @@ const autoState=()=>{if(document.visibilityState!=='visible')return;
   refresh().catch(()=>{});};
 setInterval(()=>{if(Date.now()-_lastAuto>55*1000)autoState();},60000);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&Date.now()-_lastAuto>30*1000)autoState();});
+
+// ---------- PARTNER (profit-share, fix #13) ----------
+// Model: partner funds applications with HIS UPI IDs (ASBA blocks/unblocks in
+// his banks; money never touches ours). Per-IPO profit share % (default 50,
+// editable any time). Settlement one-direction: us -> him, after listing-day
+// sale. due = his invested capital + pct x booked P&L.
+let PT=null, PSH=null;
+async function loadPartner(){
+  try{
+    const [p,h]=await Promise.all([api('/api/partner'),api('/api/partner/settlements')]);
+    PT=p;PSH=h;
+  }catch(e){/* toast already shown by api() */}
+}
+function renderPartner(){
+  const el=document.getElementById('tab-partner');
+  if(PT)drawPartner(); else el.innerHTML='<div class="mut" style="padding:30px;text-align:center">Loading partner…</div>';
+  loadPartner().then(()=>{if(curTab==='partner')drawPartner();});
+}
+window.drawPartner=()=>{
+  const el=document.getElementById('tab-partner');
+  if(!PT){el.innerHTML='<div class="card mut">Still loading — give it a second and it will render.</div>';return;}
+  const F=PT.friends||[];
+  if(!F.length){ // first-run onboarding
+    el.innerHTML=`<div class="card" style="max-width:580px">
+      <h3>🤝 Add your profit-share partner</h3>
+      <div class="mut" style="font-size:12.5px;padding-bottom:10px">He funds the applications with HIS UPI IDs — ASBA blocks in his banks, refunds return to him automatically. On listing day you sell everything, then send him <b>his capital + his share of the profit</b> (default 50%, changeable per IPO). The app tracks it IPO by IPO and nags until settled.</div>
+      <div class="form-grid">
+        <div class="field"><label>Partner name</label><input id="pf-name" placeholder="e.g. Nithesh" maxlength="40"></div>
+        <div class="field"><label>Note (optional)</label><input id="pf-note" placeholder="e.g. funds from Sep 2026"></div>
+      </div>
+      <div class="foot"><button class="btn" onclick="partnerAdd()">Add partner</button></div></div>`;
+    return;}
+  const badge=s=>s==='payable'?'<span class="chip" style="background:#7f1d1d;color:#fecaca">⏳ payable</span>'
+      :(s==='settled'?'<span class="chip" style="background:#14532d;color:#bbf7d0">settled ✅</span>'
+      :'<span class="chip">🕐 accruing</span>');
+  const cards=(PT.ipos||[]).map(r=>{
+    const f=F.find(x=>x.id===r.friend_id)||{name:'?'};
+    const first=esc((f.name||'').split(' ')[0]||'Partner');
+    const ctl=(r.state==='payable'&&r.pending>0.5)?`
+      <div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center;padding-top:10px;border-top:1px dashed var(--line);margin-top:10px">
+        <input id="ps-a-${r.ipo_id}-${r.friend_id}" type="number" inputmode="decimal" value="${esc(Math.round(r.pending))}" style="width:120px" title="Amount paid">
+        <button class="btn sm" onclick="partnerSettle(${r.ipo_id},${r.friend_id})">✅ Record payment</button>
+      </div>`:'';
+    return `<div class="card">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap">
+        <div style="min-width:0"><a role="link" style="color:var(--acc2);font-weight:750;text-decoration:underline;cursor:pointer;font-size:14.5px" onclick="goApps(${r.ipo_id})">${esc(r.name)}</a>
+          <div class="mut" style="font-size:11.5px;margin-top:2px">${r.listing_date?('listing '+fd(r.listing_date)):'listing date soon'}</div></div>
+        <div style="display:flex;gap:6px;align-items:center">${badge(r.state)}
+          <button class="btn sm ghost" title="Tap to change this IPO's split" onclick="pctModal(${r.ipo_id},${r.friend_id},${r.pct},${r.override?1:0})">🤝 ${first} ${num(r.pct)}%${r.override?'':'&nbsp;<span class="mut" style="font-size:10px">(def)</span>'}</button></div>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px;padding-top:9px">
+        <span>His capital <b>${rs(r.invested)}</b></span>
+        ${r.booked?`<span>Profit booked <b class="${pnlCls(r.booked)}">${pnlTxt(Math.round(r.booked))}</b></span>
+        <span>→ his <b class="${pnlCls(r.friend_share)}">${pnlTxt(Math.round(r.friend_share))}</b> • mine <b class="${pnlCls(r.my_share)}">${pnlTxt(Math.round(r.my_share))}</b></span>`
+        :(r.state==='accruing'&&r.est_accr_friend?`<span class="mut">est his share <b>${pnlTxt(Math.round(r.est_accr_friend))}</b> accruing at CMP — counts once sold</span>`:'<span class="mut">profit shows after the sale is recorded</span>')}
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13.5px;padding-top:8px">
+        <span>Due to him <b>${rs(r.due)}</b></span>
+        <span>Paid <b class="pos">${rs(r.paid)}</b></span>
+        <span>Pending <b class="${r.pending>0.5?'neg':'mut'}" style="font-size:15px">${rs(r.pending)}</b></span>
+      </div>
+      ${ctl}
+    </div>`;}).join('');
+  el.innerHTML=`
+    <div class="toolbar"><span class="mut">Applications filed with his UPI ID auto-appear here once alloted. Default split <b>${num(PT.default_pct)}%</b> — tap the 🤝 chip on any IPO to change. Settle after the listing-day sale. IPOs filed with your own UPI stay 100% yours, untouched.</span></div>
+    ${PT.pending_total>0.5?`<div class="card" style="border:1.5px solid var(--neg)"><b class="neg">⏳ Total pending to pay: ${rs(PT.pending_total)}</b> <span class="mut">across ${PT.pending_n} IPO${PT.pending_n>1?'s':''}</span></div>`:''}
+    ${F.map(f=>`<div class="card" style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start">
+      <div style="min-width:220px;flex:1">
+        <b style="font-size:15px">🤝 ${esc(f.name)}</b>${f.note?` <span class="mut" style="font-size:11.5px">${esc(f.note)}</span>`:''}
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:7px">
+          ${(f.vpas&&f.vpas.length)?f.vpas.map(v=>`<span class="chip" style="font-family:ui-monospace,monospace">${esc(v.vpa)} <a role="link" style="cursor:pointer;color:var(--neg)" title="Remove this UPI" onclick="partnerVpaDel(${f.id},${v.id})">✕</a></span>`).join(''):'<span class="mut" style="font-size:11.5px">no UPI IDs saved yet — add the ones he gives for the applications</span>'}
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input id="pv-${f.id}" placeholder="his UPI ID (name@bank)" style="width:180px" autocapitalize="off" autocomplete="off">
+        <button class="btn sm" onclick="partnerVpaAdd(${f.id})">+ UPI</button>
+        <button class="btn sm ghost" title="Edit name / note" onclick="friendModal(${f.id})">✏️</button>
+      </div></div>`).join('')}
+    ${cards||'<div class="card mut">No partner-funded IPOs yet — they appear automatically when an application filed with his UPI ID wins an allotment.</div>'}
+    ${(PSH&&PSH.length)?`<div class="card"><h3 style="margin:0 0 4px">🧾 Settlement history</h3>${PSH.map(s=>`<div style="display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px dashed var(--line);font-size:13px;align-items:center">
+      <span style="min-width:0">${fd(s.paid_on)} • <b>${esc(s.ipo_name)}</b> → ${esc(s.friend)}${s.note?` <span class="mut">(${esc(s.note)})</span>`:''}</span>
+      <span style="display:flex;gap:10px;align-items:center;white-space:nowrap"><b>${rs(s.amount)}</b><a role="link" style="cursor:pointer;color:var(--neg)" title="Delete this entry (mistake)" onclick="partnerSettleDel(${s.id})">✕</a></span></div>`).join('')}</div>`:''}`;
+};
+window.partnerAdd=async()=>{
+  const name=document.getElementById('pf-name').value.trim();
+  if(!name)return toast('Name required',1);
+  await api('/api/partner/friends','POST',{name,note:document.getElementById('pf-note').value});
+  await loadPartner();drawPartner();
+  toast('Partner added ✓ — now save his UPI ID(s)');};
+window.friendModal=(fid)=>{
+  const f=(PT.friends||[]).find(x=>x.id===fid);if(!f)return;
+  openModal(`<h3>✏️ ${esc(f.name)}</h3><div class="form-grid">
+    <div class="field"><label>Name</label><input id="fe-name" value="${esc(f.name)}" maxlength="40"></div>
+    <div class="field"><label>Note</label><input id="fe-note" value="${esc(f.note||'')}"></div></div>
+    <div class="foot"><button class="btn" onclick="friendSave(${fid})">Save</button></div>`);};
+window.friendSave=async(fid)=>{
+  await api('/api/partner/friends/'+fid,'PUT',{name:document.getElementById('fe-name').value,note:document.getElementById('fe-note').value});
+  closeModal();await loadPartner();drawPartner();toast('Saved');};
+window.partnerVpaAdd=async(fid)=>{
+  const box=document.getElementById('pv-'+fid), v=box.value.trim();
+  if(!v)return toast('Enter his UPI ID',1);
+  await api('/api/partner/friends/'+fid+'/vpas','POST',{vpa:v});
+  box.value='';await loadPartner();drawPartner();
+  toast('UPI saved ✓ — his IPOs now auto-detect');};
+window.partnerVpaDel=async(fid,vid)=>{
+  await api(`/api/partner/friends/${fid}/vpas/${vid}`,'DELETE');
+  await loadPartner();drawPartner();toast('UPI removed');};
+window.pctModal=(ipoId,fid,cur,isOverride)=>{
+  const f=(PT.friends||[]).find(x=>x.id===fid)||{name:'Partner'};
+  const r=(PT.ipos||[]).find(x=>x.ipo_id===ipoId&&x.friend_id===fid)||{};
+  openModal(`<h3>🤝 ${esc(r.name||'IPO')} — profit split</h3>
+    <div class="mut" style="font-size:12.5px;padding-bottom:10px">${esc(f.name)}'s share of this IPO's profit <b>and</b> loss. Your share is the rest. Default is ${num(PT.default_pct)}% — set here only when this IPO differs.</div>
+    <div style="display:flex;gap:7px;align-items:center;padding-bottom:12px;flex-wrap:wrap">
+      <input id="pct-in" type="number" inputmode="decimal" min="0" max="100" step="0.5" value="${esc(cur)}" style="width:100px;font-size:18px;font-weight:800;text-align:center"><b>%</b>
+      ${[40,50,60].map(v=>`<button class="btn sm ghost" onclick="document.getElementById('pct-in').value=${v}">${v}</button>`).join('')}
+    </div>
+    <div class="foot"><button class="btn" onclick="pctSave(${ipoId},${fid})">Save</button>
+    ${isOverride?`<button class="btn ghost" onclick="pctClear(${ipoId},${fid})">Back to default</button>`:''}</div>`);};
+window.pctSave=async(ipoId,fid)=>{
+  const v=parseFloat(document.getElementById('pct-in').value);
+  if(!(v>=0&&v<=100))return toast('% must be between 0 and 100',1);
+  await api('/api/partner/pct','POST',{friend_id:fid,ipo_id:ipoId,pct:v});
+  closeModal();await loadPartner();drawPartner();refresh();toast('Split saved ✓');};
+window.pctClear=async(ipoId,fid)=>{
+  await api('/api/partner/pct','POST',{friend_id:fid,ipo_id:ipoId,pct:null});
+  closeModal();await loadPartner();drawPartner();refresh();toast('Back to the default split');};
+window.partnerSettle=async(ipoId,fid)=>{
+  const amt=parseFloat(document.getElementById(`ps-a-${ipoId}-${fid}`).value);
+  if(!(amt>0))return toast('Amount must be positive',1);
+  await api('/api/partner/settle','POST',{friend_id:fid,ipo_id:ipoId,amount:amt});
+  await loadPartner();drawPartner();refresh();toast('Payment recorded ✅');};
+window.partnerSettleDel=async(sid)=>{
+  await api('/api/partner/settle/'+sid,'DELETE');
+  await loadPartner();drawPartner();toast('History entry removed');};
 
 // ---------- modal ----------
 function openModal(html){document.getElementById('modal').innerHTML=html;
