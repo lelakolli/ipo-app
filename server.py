@@ -967,11 +967,24 @@ def mufg_companies(force=False):
 def check_linkintime(ipo, acc, force=False):
     """MUFG Intime (prev Link Intime) — new portal does NOT block servers.
        Chain: POST GetDetails (company list) -> generateToken -> SearchOnPan
-       {clientid, PAN, IFSC:'', CHKVAL:'1', token} ; response d = XML rows with
-       <ALLOT> (allotted qty) and <SHARES> (applied). Empty dataset = no record."""
+       {clientid, PAN, IFSC:'', CHKVAL, token}. CHKVAL selects the search type:
+       '1' PAN • '2' application no • '3' 16-digit DP/Client BO ID • '4' bank
+       a/c+IFSC — the SAME 'PAN' payload field carries whichever key; the page
+       proves it (hidden #hdnval). Verified live Sep 10: account with only a
+       CDSL BO ID answered identically to a PAN search (Kanohar, co 11931).
+       response d = XML rows <ALLOT>/<SHARES>. Empty dataset = no record.
+       <Table1><Msg> = token hiccup -> regenerate the token once and retry."""
     pan = (acc.get("pan") or "").strip().upper()
-    if not pan:
-        return {"status": "manual", "note": "MUFG auto-check needs PAN (only BO ID stored) — use one-click link",
+    boid = re.sub(r"\D", "", acc.get("cdsl") or "")
+    if len(boid) != 16:
+        boid = ""
+    if pan:                        # PAN accounts: unchanged behaviour
+        key, chkval, mode = pan, "1", "PAN"
+    elif boid:                     # BO-ID-only accounts: DP/Client search
+        key, chkval, mode = boid, "3", "BO ID"
+    else:
+        return {"status": "manual",
+                "note": "MUFG auto-check needs a PAN or a 16-digit CDSL BO ID — add one on the Accounts tab",
                 "link": REGISTRAR_LINKS["Link Intime"]}
     try:
         comps = mufg_companies(force=force)
@@ -994,17 +1007,25 @@ def check_linkintime(ipo, acc, force=False):
         return {"status": "manual", "note": "IPO not in MUFG live list yet (allotment not published?)",
                 "link": REGISTRAR_LINKS["Link Intime"]}
     try:
-        tok = requests.post(MUFG_BASE + "generateToken", json={}, headers=UA, timeout=15).json()["d"]
-        payload = {"clientid": match["id"], "PAN": pan, "IFSC": "", "CHKVAL": "1", "token": tok}
-        r = requests.post(MUFG_BASE + "SearchOnPan", data=json.dumps(payload),
-                          headers={**UA, "Content-Type": "application/json; charset=utf-8"}, timeout=20)
-        x = r.json().get("d", "")
+        x = ""
+        for _attempt in (1, 2):          # <Table1><Msg> = stale token → regenerate once
+            tok = requests.post(MUFG_BASE + "generateToken", json={}, headers=UA, timeout=15).json()["d"]
+            payload = {"clientid": match["id"], "PAN": key, "IFSC": "", "CHKVAL": chkval, "token": tok}
+            r = requests.post(MUFG_BASE + "SearchOnPan", data=json.dumps(payload),
+                              headers={**UA, "Content-Type": "application/json; charset=utf-8"}, timeout=20)
+            x = r.json().get("d", "")
+            if "<Table1" not in x:
+                break
     except Exception as e:
         return {"status": "manual", "note": f"MUFG API error ({e})", "link": REGISTRAR_LINKS["Link Intime"]}
+    if "<Table1" in x:
+        return {"status": "manual",
+                "note": "MUFG rejected the session token twice (their server mood) — retry in a minute",
+                "matched_company": match["name"], "link": REGISTRAR_LINKS["Link Intime"]}
     rows_xml = re.findall(r"<Table>(.*?)</Table>", x, re.S)
     if not rows_xml:
         return {"status": "manual",
-                "note": f"MUFG has NO record under this PAN at {match['name']} — check PAN typed right; if correct, verify the application in Groww",
+                "note": f"MUFG has NO record under this {mode} at {match['name']} — check {mode} typed right; if correct, verify the application in Groww",
                 "matched_company": match["name"], "link": REGISTRAR_LINKS["Link Intime"]}
     allot = sum(int(v) for row in rows_xml
                 for t, v in re.findall(r"<(ALLOT)>\s*(\d+)\s*</\1>", row))
@@ -1012,10 +1033,10 @@ def check_linkintime(ipo, acc, force=False):
                   for t, v in re.findall(r"<(SHARES)>\s*(\d+)\s*</\1>", row))
     if allot > 0:
         return {"status": "ok", "allotted_qty": allot,
-                "note": f"MUFG: ALLOTTED {allot} shares (applied {applied or '?'}, {len(rows_xml)} record(s))",
+                "note": f"MUFG({mode}): ALLOTTED {allot} shares (applied {applied or '?'}, {len(rows_xml)} record(s))",
                 "matched_company": match["name"]}
     return {"status": "not_found",
-            "note": f"MUFG: applied {applied or '?'} shares, allotted 0 — NOT allotted ({match['name']})",
+            "note": f"MUFG({mode}): applied {applied or '?'} shares, allotted 0 — NOT allotted ({match['name']})",
             "matched_company": match["name"]}
 
 
