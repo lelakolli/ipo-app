@@ -255,7 +255,6 @@ main{padding-bottom:8px}
     <button data-tab="dash" class="on" data-ic="🏠">Dashboard</button>
     <button data-tab="ipos" data-ic="📋">IPOs</button>
     <button data-tab="apps" data-ic="✅">Applications</button>
-    <button data-tab="market" data-ic="💹">Market</button>
     <button data-tab="accounts" data-ic="👥">Accounts</button>
     <button data-tab="pnl" data-ic="💰">P&amp;L</button>
     <button data-tab="partner" data-ic="🤝">Partner</button>
@@ -263,7 +262,6 @@ main{padding-bottom:8px}
 <main>
   <section id="tab-dash"></section>
   <section id="tab-ipos" style="display:none"></section>
-  <section id="tab-market" style="display:none"></section>
   <section id="tab-apps" style="display:none"></section>
   <section id="tab-accounts" style="display:none"></section>
   <section id="tab-pnl" style="display:none"></section>
@@ -341,6 +339,16 @@ const gmpAge=ts=>{const t=new Date(ts);if(isNaN(t))return'';
 const gmpStale=i=>{if(!i.mkt||!i.mkt.updated_at)return false;
   const t=new Date(i.mkt.updated_at);return !isNaN(t)&&(Date.now()-t.getTime()>60*60000);};
 
+// ---------- 📆 activity day navigator (past & future browsing) ----------
+let calDay=null;  // module-level so the 60 s auto-poll never steals the day being browsed
+const _calFmt=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+const dayLbl=iso=>{try{return new Date(iso+'T00:00:00').toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short'});}catch(e){return iso;}};
+window.calShift=(d)=>{
+  if(d===0)calDay=null;
+  else{const x=new Date((calDay||S.today)+'T00:00:00');x.setDate(x.getDate()+d);
+    calDay=_calFmt(x);if(calDay===S.today)calDay=null;}
+  renderDash();};
+
 // ---------- tabs ----------
 document.querySelectorAll('nav button[data-tab]').forEach(b=>b.onclick=()=>{curTab=b.dataset.tab;
   document.querySelectorAll('nav button[data-tab]').forEach(x=>x.classList.toggle('on',x===b));
@@ -348,7 +356,7 @@ document.querySelectorAll('nav button[data-tab]').forEach(b=>b.onclick=()=>{curT
   document.getElementById('tab-'+curTab).style.display='block';render();});
 
 function render(){
-  ({dash:renderDash,ipos:renderIpos,market:renderMarket,apps:renderApps,accounts:renderAccounts,pnl:renderPnl,partner:renderPartner})[curTab]();
+  ({dash:renderDash,ipos:renderIpos,apps:renderApps,accounts:renderAccounts,pnl:renderPnl,partner:renderPartner})[curTab]();
 }
 window.goTab=t=>{const b=document.querySelector('nav button[data-tab="'+t+'"]');if(b)b.click();};
 
@@ -493,28 +501,37 @@ function renderDash(){
     <div style="display:flex;gap:8px;overflow-x:auto;padding:0 0 10px;-webkit-overflow-scrolling:touch">${
     pills.map(p=>`<div class="tpill ${p.cls||''}" ${p.act?`onclick="${p.act}"`:''}><span style="font-size:20px">${p.ic}</span><span><div style="font-size:13px;font-weight:600;white-space:nowrap">${p.t}</div><div class="mut" style="font-size:11px;white-space:nowrap">${p.s}</div></span></div>`).join('')}</div>`:'';
 
-  // 📆 TODAY'S ACTIVITY — the 4 event types lined up; ALWAYS shown, so "— none today" is an answer too
-  const taOpen=S.ipos.filter(i=>i.open_date===S.today);
-  const taClose=S.ipos.filter(i=>i.close_date===S.today);
-  const taAllot=S.ipos.filter(i=>i.allotment_date===S.today);
-  const taList=S.ipos.filter(i=>i.listing_date===S.today);
+  // 📆 ACTIVITY BY DAY — the 4 event types, browsable ANY day past or future
+  const today0=S.today, day=calDay||today0;
+  const taOpen=S.ipos.filter(i=>i.open_date===day);
+  const taClose=S.ipos.filter(i=>i.close_date===day);
+  const taAllot=S.ipos.filter(i=>i.allotment_date===day);
+  const taList=S.ipos.filter(i=>i.listing_date===day);
   const taChip=(i,extra,check)=>`<span class="chip" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px" title="${check?'Tap to run the allotment check':'Tap to open'}" onclick="goApps(${i.id}${check?',1':''})"><b>${esc(i.name)}</b>${extra||''}</span>`;
   const taRow=(ix,ic,label,rows,mk)=>`<div style="display:flex;gap:10px;padding:7px 0;align-items:flex-start;${ix<3?'border-bottom:1px solid var(--line);':''}">
       <span style="font-size:17px;line-height:1.3">${ic}</span>
       <div style="flex:1;min-width:0"><span style="font-size:12.5px;font-weight:700">${label}</span>
-      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:${rows.length?5:1}px">${rows.length?rows.map(mk).join(''):'<span class="mut" style="font-size:11.5px">— none today</span>'}</div></div></div>`;
+      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:${rows.length?5:1}px">${rows.length?rows.map(mk).join(''):'<span class="mut" style="font-size:11.5px">— none this day</span>'}</div></div></div>`;
   const nAct=S.accounts.filter(a=>a.active).length;
-  const todayActs=`<div class="card" style="margin-bottom:12px">
-    <h3 style="margin:0 0 2px">📆 Today's activity <small>— ${fd(S.today)} • tap a name to jump in</small></h3>${
+  const todayActs=`<div class="card" style="margin-bottom:12px" id="actCard">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:2px">
+      <button class="btn sm ghost" title="Previous day" onclick="calShift(-1)">◀</button>
+      <b style="font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">📆 ${dayLbl(day)}${day===today0?' <span class="chip" style="background:var(--acc);color:#fff;font-size:10px;vertical-align:2px">TODAY</span>':''}</b>
+      <span style="display:flex;gap:5px;align-items:center">
+        ${day!==today0?'<button class="btn sm" title="Jump back to today" onclick="calShift(0)">⟲ today</button>':''}
+        <button class="btn sm ghost" title="Next day" onclick="calShift(1)">▶</button>
+      </span>
+    </div>${
     taRow(0,'🚀','Opened for application',taOpen,i=>taChip(i,i.gmp?` · GMP ₹${num(i.gmp)}`:'')) +
-    taRow(1,'⏰','Closing today (apply by ~1 PM)',taClose,i=>taChip(i,` · applied ${S.applications.filter(a=>a.ipo_id===i.id&&a.applied).length}/${nAct}${i.gmp?` · GMP ₹${num(i.gmp)}`:''}`)) +
-    taRow(2,'🎯','Allotment today',taAllot,i=>taChip(i,` · ${esc(i.registrar)} · tap to check`,1)) +
-    taRow(3,'🔔','Listing today',taList,i=>{const sh=S.applications.filter(a=>a.ipo_id===i.id&&a.allotment==='allotted').reduce((s,a)=>s+(a.allotted_qty||0),0);
+    taRow(1,'⏰','Closing (apply by ~1 PM)',taClose,i=>taChip(i,` · applied ${S.applications.filter(a=>a.ipo_id===i.id&&a.applied).length}/${nAct}${i.gmp?` · GMP ₹${num(i.gmp)}`:''}`)) +
+    taRow(2,'🎯','Allotment day',taAllot,i=>taChip(i,` · ${esc(i.registrar)}${day<=today0?' · tap to check':''}`,day<=today0?1:0)) +
+    taRow(3,'🔔','Listing day',taList,i=>{const sh=S.applications.filter(a=>a.ipo_id===i.id&&a.allotment==='allotted').reduce((s,a)=>s+(a.allotted_qty||0),0);
       return taChip(i,sh?` · holding ${num(sh)} sh`:(i.mkt&&i.mkt.est_listing?` · est ₹${num(i.mkt.est_listing)}`:''));})
-    }</div>`;
+    }
+    <div class="mut" style="font-size:10.5px;padding-top:7px">tap a name to jump in • <a role="link" style="color:var(--acc2);text-decoration:underline;cursor:pointer" onclick="calShift(-7)">‹ 7 days back</a> · <a role="link" style="color:var(--acc2);text-decoration:underline;cursor:pointer" onclick="calShift(7)">7 days ahead ›</a></div>
+  </div>`;
 
   el.innerHTML=`
-  <div class="info">💡 Allotment is <b>PAN-based</b> — keep one unique PAN per account or exchanges reject duplicate bids. This app never asks for your demat/broker passwords; allotment checks use only PAN / CDSL BO ID (public registrar data). <b>Tap any summary box below for its full break-up.</b></div>
   ${todayStrip}
   ${todayActs}
   <div class="grid-kpi">
