@@ -259,11 +259,14 @@ def _gh_headers():
 
 
 def _gh_branch_ready():
-    """Ensure the backup branch exists (checked once per process). If the branch
-    can't be verified/created, fall back to pushing to main — the data matters
-    more than the deploy noise."""
-    if _branch_state["checked"]:
-        return _branch_state["ok"]
+    """Ensure the backup branch exists. Success is cached for the process; a
+    FAILURE is never cached — the next push re-checks, so one transient GitHub
+    blip at boot can't pin a whole process to pushing backups onto main (each
+    such push = a pointless Render build + session wipe). When the check fails
+    we still fall back to main for THAT push — the data matters more than the
+    deploy noise — but we heal as soon as the API answers again."""
+    if _branch_state["checked"] and _branch_state["ok"]:
+        return True
     _branch_state["checked"] = True
     try:
         base = f"https://api.github.com/repos/{_GH_REPO}/git"
@@ -1675,8 +1678,8 @@ CONF_FILE = DATA / "config.json"
 if CONF_FILE.exists():
     CONF = json.loads(CONF_FILE.read_text())
 else:
-    CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}  # randomized on every boot for the public mirror
-    print(f"[boot] FIRST-RUN PASSCODE for this deploy: {CONF['passcode']}", flush=True)
+    CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}
+    print("[boot] FIRST-RUN PASSCODE:", CONF["passcode"], flush=True)
     try:
         CONF_FILE.write_text(json.dumps(CONF))
     except Exception:

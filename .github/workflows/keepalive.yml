@@ -1,0 +1,21 @@
+name: keepalive
+
+on:
+  schedule:
+    # every ~10 minutes — free hosts sleep after ~15 min idle; a steady ping keeps the app awake
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the app (3 soft attempts, never fail the run)
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" -m 45 https://ipo-command-center.onrender.com/ || true)
+            echo "attempt $i -> HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 20
+          done
+          exit 0
