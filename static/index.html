@@ -507,7 +507,7 @@ function renderDash(){
   const taClose=S.ipos.filter(i=>i.close_date===day);
   const taAllot=S.ipos.filter(i=>i.allotment_date===day);
   const taList=S.ipos.filter(i=>i.listing_date===day);
-  const taChip=(i,extra,check)=>`<span class="chip" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px" title="${check?'Tap to run the allotment check':'Tap to open'}" onclick="goApps(${i.id}${check?',1':''})"><b>${esc(i.name)}</b>${extra||''}</span>`;
+  const taChip=(i,extra,check)=>`<span class="chip" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px;white-space:normal;max-width:100%;overflow-wrap:anywhere;text-align:left" title="${check?'Tap to run the allotment check':'Tap to open'}" onclick="goApps(${i.id}${check?',1':''})"><b>${esc(i.name)}</b>${extra||''}</span>`;
   const taRow=(ix,ic,label,rows,mk)=>`<div style="display:flex;gap:10px;padding:7px 0;align-items:flex-start;${ix<3?'border-bottom:1px solid var(--line);':''}">
       <span style="font-size:17px;line-height:1.3">${ic}</span>
       <div style="flex:1;min-width:0"><span style="font-size:12.5px;font-weight:700">${label}</span>
