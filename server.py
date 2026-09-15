@@ -132,6 +132,27 @@ def init_db():
             friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
             vpa TEXT NOT NULL UNIQUE
         );
+        -- fix #17: shorthand labels the user types on applications ("n sbi")
+        -- that ALSO mean partner money. from_date gates the partnership start —
+        -- the same shorthand on pre-partnership IPOs must NOT count.
+        CREATE TABLE IF NOT EXISTS friend_aliases(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
+            label TEXT NOT NULL,
+            from_date TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(label)
+        );
+        -- fix #18: khata — manual money entries NOT tied to an IPO (advances,
+        -- adjustments). Always us -> him; they reduce the running khata balance.
+        CREATE TABLE IF NOT EXISTS friend_cash(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
+            amount REAL NOT NULL,
+            note TEXT DEFAULT '',
+            paid_on TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
         CREATE TABLE IF NOT EXISTS friend_ipo_pct(
             friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
             ipo_id INTEGER NOT NULL REFERENCES ipos(id) ON DELETE CASCADE,
@@ -191,7 +212,8 @@ import arthan  # noqa: E402 — market-intelligence engine (self-verifying IPO d
 # ----------------------------------------------------------------------------
 
 BACKUP_TABLES = ("accounts", "ipos", "applications", "push_subs", "kv",
-                 "friends", "friend_vpas", "friend_ipo_pct", "friend_settlements")
+                 "friends", "friend_vpas", "friend_ipo_pct", "friend_settlements",
+                 "friend_aliases", "friend_cash")
 # mirror paths follow the DB location (identical in production — DB lives in
 # DATA — but a test box pointing IPO_DB elsewhere no longer inherits the
 # production mirror file as its "local backup" restore source)
@@ -1544,17 +1566,17 @@ def compute_alerts():
     # partner UPI map for mandate nudges: when the pending mandate sits on the
     # PARTNER's UPI ID, the reminder must say whom to ping (fix #13)
     try:
-        _pfrs, _pvpa, _ = _partner_maps()
+        _pfrs, _pvpa, _pal, _ = _partner_maps()
         _pfname = {f["id"]: f["name"] for f in _pfrs}
     except Exception:
-        _pvpa, _pfname = {}, {}
+        _pvpa, _pal, _pfname = {}, {}, {}
     for a in apps:
         ipo = nm.get(a["ipo_id"])
         if not ipo:
             continue
         in_window = (ipo.get("open_date") or "9999") <= t <= (ipo.get("close_date") or "")
         if a["mandate_status"] == "pending" and in_window:
-            _pf = _pvpa.get((a.get("upi") or "").strip().lower())
+            _pf = _partner_fid(_pvpa, _pal, a.get("upi"), ipo)
             partner_tag = f" • on {_pfname[_pf]}'s UPI — ask him to approve" if _pf in _pfname else ""
             alerts.append({"sev": "high", "kind": "mandate", "ipo_id": ipo["id"],
                            "title": "UPI mandate pending",
@@ -2996,9 +3018,28 @@ def _partner_maps():
     vpa_map = {}          # lowercased vpa -> friend_id (auto-detects partner funding)
     for v in rows("SELECT fv.friend_id, fv.vpa FROM friend_vpas fv JOIN friends f ON f.id=fv.friend_id"):
         vpa_map[(v["vpa"] or "").strip().lower()] = v["friend_id"]
+    alias_map = {}        # lowercased shorthand label -> (friend_id, from_date)
+    for a in rows("SELECT fa.friend_id, fa.label, fa.from_date FROM friend_aliases fa JOIN friends f ON f.id=fa.friend_id"):
+        alias_map[(a["label"] or "").strip().lower()] = (a["friend_id"], a["from_date"] or "")
     pct_map = {(p["friend_id"], p["ipo_id"]): p["pct"]
                for p in rows("SELECT friend_id, ipo_id, pct FROM friend_ipo_pct")}
-    return frs, vpa_map, pct_map
+    return frs, vpa_map, alias_map, pct_map
+
+
+def _partner_fid(vpa_map, alias_map, upi, ipo):
+    """Resolve an application's UPI text to a partner friend_id. Full VPAs
+    match exactly (always on, no date gate — nobody types 20 chars by habit).
+    Shorthand aliases match too, but only from the partnership start date
+    onwards (from_date): the same label may predate the partnership (fix #17).
+    A blank open_date on the IPO passes the gate conservatively (undated ⇒ new)."""
+    key = (upi or "").strip().lower()
+    fid = vpa_map.get(key)
+    if fid:
+        return fid
+    hit = alias_map.get(key)
+    if hit and (hit[1] or "") <= (ipo.get("open_date") or "9999"):
+        return hit[0]
+    return None
 
 
 def _a_pnl_split(a: dict, cmp_: float):
@@ -3014,14 +3055,17 @@ def _a_pnl_split(a: dict, cmp_: float):
 
 
 def partner_summary(ipo_id: int = None) -> dict:
-    frs, vpa_map, pct_map = _partner_maps()
+    frs, vpa_map, alias_map, pct_map = _partner_maps()
     friends_out = []
     for f in frs:
         friends_out.append({**f,
                             "vpas": rows("SELECT id, vpa FROM friend_vpas WHERE friend_id=? ORDER BY id",
-                                         (f["id"],))})
+                                         (f["id"],)),
+                            "aliases": rows("SELECT id, label, from_date FROM friend_aliases WHERE friend_id=? ORDER BY id",
+                                            (f["id"],))})
     base = {"friends": friends_out, "default_pct": DEFAULT_PARTNER_PCT,
-            "ipos": [], "pending_total": 0.0, "pending_n": 0}
+            "ipos": [], "pending_total": 0.0, "pending_n": 0,
+            "cash": [], "khata": []}
     if not frs:
         return base
     fids = {f["id"] for f in frs}
@@ -3032,7 +3076,7 @@ def partner_summary(ipo_id: int = None) -> dict:
         apps = rows("SELECT * FROM applications WHERE ipo_id=? AND applied=1", (i["id"],))
         inv_by, book_by, acr_by, sold_by = {}, {}, {}, {}
         for a in apps:
-            fid = vpa_map.get((a.get("upi") or "").strip().lower())
+            fid = _partner_fid(vpa_map, alias_map, a.get("upi"), i)
             if not fid or fid not in fids:
                 continue
             if a["allotment"] != "allotted":
@@ -3079,6 +3123,25 @@ def partner_summary(ipo_id: int = None) -> dict:
                                      r["listing_date"] or "9999", r["ipo_id"]), reverse=False)
     base["pending_total"] = round(ptot, 2)
     base["pending_n"] = pn
+    # ---- fix #18: khata ---- running balance per friend: IPO dues still open
+    # (payable state only — pre-sale there's no cash obligation yet) MINUS
+    # manual cash already sent (advances/adjustments ride as credit).
+    base["cash"] = rows("""SELECT c.*, f.name friend FROM friend_cash c
+                            JOIN friends f ON f.id=c.friend_id
+                            ORDER BY c.id DESC LIMIT 40""")
+    pend_by = {}
+    for r in base["ipos"]:
+        if r["pending"] > 0.5:
+            pend_by[r["friend_id"]] = pend_by.get(r["friend_id"], 0.0) + r["pending"]
+    credit_by = {c["friend_id"]: 0.0 for c in base["cash"]}
+    for c in base["cash"]:
+        credit_by[c["friend_id"]] = credit_by.get(c["friend_id"], 0.0) + (c["amount"] or 0)
+    for f in frs:
+        pend = round(pend_by.get(f["id"], 0.0), 2)
+        cred = round(credit_by.get(f["id"], 0.0), 2)
+        base["khata"].append({"friend_id": f["id"], "friend": f["name"],
+                              "payable": pend, "cash_credit": cred,
+                              "balance": round(pend - cred, 2)})
     return base
 
 
@@ -3127,6 +3190,66 @@ def api_vpa_add(fid: int, b: dict = Body(...)):
 @app.delete("/api/partner/friends/{fid}/vpas/{vid}")
 def api_vpa_del(fid: int, vid: int):
     run("DELETE FROM friend_vpas WHERE id=? AND friend_id=?", (vid, fid))
+    backup_now()
+    return partner_summary()
+
+
+_ALIAS_OK = re.compile(r"^[a-z0-9][a-z0-9 ._+\-]{0,39}$")
+
+
+@app.post("/api/partner/friends/{fid}/aliases")
+def api_alias_add(fid: int, b: dict = Body(...)):
+    """Save a shorthand label the user types on applications that means
+    partner money ("n sbi"). Normalized lowercase; optionally date-gated so
+    pre-partnership uses of the same label stay out (fix #17)."""
+    if not rows("SELECT 1 x FROM friends WHERE id=?", (fid,)):
+        raise HTTPException(404, "friend not found")
+    label = re.sub(r"\s+", " ", (b.get("label") or "").strip().lower())
+    if "@" in label:
+        raise HTTPException(400, "That's a full UPI ID — use + UPI instead")
+    if not _ALIAS_OK.match(label):
+        raise HTTPException(400, "Label: 1–40 chars, letters/numbers/spaces only")
+    from_date = (b.get("from_date") or "").strip()
+    if from_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", from_date):
+        raise HTTPException(400, "from_date must be YYYY-MM-DD")
+    if rows("SELECT 1 x FROM friend_aliases WHERE label=?", (label,)):
+        raise HTTPException(400, "This label is already saved")
+    if rows("SELECT 1 x FROM friend_vpas WHERE vpa=?", (label,)):
+        raise HTTPException(400, "Already saved as a UPI ID")
+    run("INSERT INTO friend_aliases(friend_id, label, from_date) VALUES(?,?,?)",
+        (fid, label, from_date))
+    backup_now()
+    return partner_summary()
+
+
+@app.delete("/api/partner/friends/{fid}/aliases/{aid}")
+def api_alias_del(fid: int, aid: int):
+    run("DELETE FROM friend_aliases WHERE id=? AND friend_id=?", (aid, fid))
+    backup_now()
+    return partner_summary()
+
+
+@app.post("/api/partner/cash")
+def api_cash_add(b: dict = Body(...)):
+    """Khata manual entry: money sent to the partner NOT tied to any IPO
+    (advance / adjustment). Reduces the running khata balance (fix #18)."""
+    fid = int(b.get("friend_id") or 0)
+    if not rows("SELECT 1 x FROM friends WHERE id=?", (fid,)):
+        raise HTTPException(404, "friend not found")
+    amount = float(b.get("amount") or 0)
+    if amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+    run("""INSERT INTO friend_cash(friend_id, amount, note, paid_on)
+           VALUES(?,?,?,?)""",
+        (fid, round(amount, 2), (b.get("note") or "").strip()[:120],
+         (b.get("paid_on") or today_str())))
+    backup_now()
+    return partner_summary()
+
+
+@app.delete("/api/partner/cash/{cid}")
+def api_cash_del(cid: int):
+    run("DELETE FROM friend_cash WHERE id=?", (cid,))
     backup_now()
     return partner_summary()
 

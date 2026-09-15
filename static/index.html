@@ -1380,6 +1380,7 @@ window.drawPartner=()=>{
     const ctl=(r.state==='payable'&&r.pending>0.5)?`
       <div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center;padding-top:10px;border-top:1px dashed var(--line);margin-top:10px">
         <input id="ps-a-${r.ipo_id}-${r.friend_id}" type="number" inputmode="decimal" value="${esc(Math.round(r.pending))}" style="width:120px" title="Amount paid">
+        <input id="ps-n-${r.ipo_id}-${r.friend_id}" placeholder="note (optional — e.g. which UPI used)" style="width:170px" maxlength="60">
         <button class="btn sm" onclick="partnerSettle(${r.ipo_id},${r.friend_id})">✅ Record payment</button>
       </div>`:'';
     return `<div class="card">
@@ -1403,20 +1404,52 @@ window.drawPartner=()=>{
       ${ctl}
     </div>`;}).join('');
   el.innerHTML=`
-    <div class="toolbar"><span class="mut">Applications filed with his UPI ID auto-appear here once alloted. Default split <b>${num(PT.default_pct)}%</b> — tap the 🤝 chip on any IPO to change. Settle after the listing-day sale. IPOs filed with your own UPI stay 100% yours, untouched.</span></div>
+    <div class="toolbar"><span class="mut">Applications filed with his UPI ID <b>or a saved shorthand label</b> auto-appear here once allotted. Default split <b>${num(PT.default_pct)}%</b> — tap the 🤝 chip on any IPO to change. Settle after the listing-day sale with NET (after-tax) proceeds entered in the sale. IPOs filed with your own UPI stay 100% yours, untouched.</span></div>
     ${PT.pending_total>0.5?`<div class="card" style="border:1.5px solid var(--neg)"><b class="neg">⏳ Total pending to pay: ${rs(PT.pending_total)}</b> <span class="mut">across ${PT.pending_n} IPO${PT.pending_n>1?'s':''}</span></div>`:''}
-    ${F.map(f=>`<div class="card" style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start">
-      <div style="min-width:220px;flex:1">
+    ${F.map(f=>{
+      const k=(PT.khata||[]).find(x=>x.friend_id===f.id)||{payable:0,cash_credit:0,balance:0};
+      const cash=(PT.cash||[]).filter(c=>c.friend_id===f.id);
+      const kline=k.balance>0.5?`<b class="neg" style="font-size:15px">🧾 you owe ${esc((f.name||'').split(' ')[0])} ${rs(k.balance)}</b>`
+        :(k.balance<-0.5?`<b class="pos" style="font-size:15px">🧾 ${rs(-k.balance)} ahead with him ✅</b>`
+        :`<b class="pos" style="font-size:15px">🧾 all square with him ✅</b>`);
+      return `<div class="card">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start">
+      <div style="min-width:230px;flex:1">
         <b style="font-size:15px">🤝 ${esc(f.name)}</b>${f.note?` <span class="mut" style="font-size:11.5px">${esc(f.note)}</span>`:''}
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:7px">
-          ${(f.vpas&&f.vpas.length)?f.vpas.map(v=>`<span class="chip" style="font-family:ui-monospace,monospace">${esc(v.vpa)} <a role="link" style="cursor:pointer;color:var(--neg)" title="Remove this UPI" onclick="partnerVpaDel(${f.id},${v.id})">✕</a></span>`).join(''):'<span class="mut" style="font-size:11.5px">no UPI IDs saved yet — add the ones he gives for the applications</span>'}
+        <div style="padding-top:6px">${kline}
+          <div class="mut" style="font-size:11px;padding-top:2px">IPO dues open ${rs(k.payable)} • manual cash sent ${rs(k.cash_credit)}</div></div>
+        <div class="mut" style="font-size:11px;font-weight:700;letter-spacing:.4px;margin-top:10px">💸 PAY TO — his UPI IDs (tap 📋 to copy)</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px">
+          ${(f.vpas&&f.vpas.length)?f.vpas.map(v=>`<span class="chip" style="font-family:ui-monospace,monospace;white-space:normal;overflow-wrap:anywhere">${esc(v.vpa)} <a role="link" style="cursor:pointer" title="Copy this UPI ID" onclick="partnerCopy(this)" data-v="${esc(v.vpa)}">📋</a> <a role="link" style="cursor:pointer;color:var(--neg)" title="Remove this UPI" onclick="partnerVpaDel(${f.id},${v.id})">✕</a></span>`).join(''):'<span class="mut" style="font-size:11.5px">no UPI IDs saved yet — add the ones he gives for the applications</span>'}
         </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px">
+          <input id="pv-${f.id}" placeholder="his UPI ID (name@bank)" style="width:170px" autocapitalize="off" autocomplete="off">
+          <button class="btn sm" onclick="partnerVpaAdd(${f.id})">+ UPI</button>
+          <button class="btn sm ghost" title="Edit name / note" onclick="friendModal(${f.id})">✏️</button>
+        </div>
+        <div class="mut" style="font-size:11px;font-weight:700;letter-spacing:.4px;margin-top:12px">🏷 SHORTHAND LABELS — the short text you type on applications</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px">
+          ${(f.aliases&&f.aliases.length)?f.aliases.map(a=>`<span class="chip" title="Applications with this UPI text count as his money${a.from_date?(' from '+fd(a.from_date)+' onwards'):''}">${esc(a.label)}${a.from_date?` <span class="mut" style="font-size:10px">from ${esc(a.from_date)}</span>`:''} <a role="link" style="cursor:pointer;color:var(--neg)" title="Remove this label" onclick="partnerAliasDel(${f.id},${a.id})">✕</a></span>`).join(''):'<span class="mut" style="font-size:11.5px">none yet — add the short text you type (e.g. n sbi) so it auto-matches</span>'}
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px">
+          <input id="pa-${f.id}" placeholder="label you type (e.g. n sbi)" style="width:160px" autocapitalize="off" autocomplete="off">
+          <input id="pd-${f.id}" type="date" value="${esc(S.today||'')}" title="This label means his money FROM this date onwards — older IPOs stay untouched" style="width:132px">
+          <button class="btn sm" onclick="partnerAliasAdd(${f.id})">+ label</button>
+        </div>
+        <div class="mut" style="font-size:10.5px;margin-top:3px">the date keeps OLD IPOs with the same text out of the split</div>
       </div>
-      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-        <input id="pv-${f.id}" placeholder="his UPI ID (name@bank)" style="width:180px" autocapitalize="off" autocomplete="off">
-        <button class="btn sm" onclick="partnerVpaAdd(${f.id})">+ UPI</button>
-        <button class="btn sm ghost" title="Edit name / note" onclick="friendModal(${f.id})">✏️</button>
-      </div></div>`).join('')}
+      <div style="min-width:210px;flex:0 1 250px">
+        <div class="mut" style="font-size:11px;font-weight:700;letter-spacing:.4px">💵 MANUAL CASH — advance / adjustment (not tied to any IPO)</div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px">
+          <input id="pc-a-${f.id}" type="number" inputmode="decimal" placeholder="₹ amount" style="width:96px">
+          <input id="pc-n-${f.id}" placeholder="note (e.g. advance)" style="width:106px" maxlength="60">
+          <button class="btn sm" onclick="partnerCashAdd(${f.id})">+ entry</button>
+        </div>
+        ${cash.length?`<div style="margin-top:7px">${cash.slice(0,8).map(c=>`<div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;padding:3px 0;border-bottom:1px dashed var(--line);align-items:center">
+            <span class="mut" style="min-width:0">${fd(c.paid_on)}${c.note?(' • '+esc(c.note)):''}</span>
+            <span style="white-space:nowrap"><b>${rs(c.amount)}</b> <a role="link" style="cursor:pointer;color:var(--neg)" title="Delete this entry (mistake)" onclick="partnerCashDel(${c.id})">✕</a></span></div>`).join('')}</div>`:''}
+      </div>
+      </div></div>`;}).join('')}
     ${cards||'<div class="card mut">No partner-funded IPOs yet — they appear automatically when an application filed with his UPI ID wins an allotment.</div>'}
     ${(PSH&&PSH.length)?`<div class="card"><h3 style="margin:0 0 4px">🧾 Settlement history</h3>${PSH.map(s=>`<div style="display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px dashed var(--line);font-size:13px;align-items:center">
       <span style="min-width:0">${fd(s.paid_on)} • <b>${esc(s.ipo_name)}</b> → ${esc(s.friend)}${s.note?` <span class="mut">(${esc(s.note)})</span>`:''}</span>
@@ -1468,8 +1501,35 @@ window.pctClear=async(ipoId,fid)=>{
 window.partnerSettle=async(ipoId,fid)=>{
   const amt=parseFloat(document.getElementById(`ps-a-${ipoId}-${fid}`).value);
   if(!(amt>0))return toast('Amount must be positive',1);
-  await api('/api/partner/settle','POST',{friend_id:fid,ipo_id:ipoId,amount:amt});
+  const noteEl=document.getElementById(`ps-n-${ipoId}-${fid}`);
+  const note=noteEl?noteEl.value:'';
+  await api('/api/partner/settle','POST',{friend_id:fid,ipo_id:ipoId,amount:amt,note});
   await loadPartner();drawPartner();refresh();toast('Payment recorded ✅');};
+window.partnerCopy=(el)=>{
+  const v=(el&&el.getAttribute('data-v'))||'';
+  if(!v)return;
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(v).then(()=>toast('📋 copied — '+v)).catch(()=>toast(v));}
+  else toast(v);  // no clipboard API: at least show it for a long-press copy
+};
+window.partnerAliasAdd=async(fid)=>{
+  const lb=document.getElementById('pa-'+fid), dt=document.getElementById('pd-'+fid);
+  const label=(lb.value||'').trim();
+  if(!label)return toast('Type the label first',1);
+  await api('/api/partner/friends/'+fid+'/aliases','POST',{label,from_date:(dt&&dt.value)||''});
+  lb.value='';await loadPartner();drawPartner();
+  toast('Label saved ✓ — applications with this text now count as his');};
+window.partnerAliasDel=async(fid,aid)=>{
+  await api(`/api/partner/friends/${fid}/aliases/${aid}`,'DELETE');
+  await loadPartner();drawPartner();toast('Label removed');};
+window.partnerCashAdd=async(fid)=>{
+  const amt=parseFloat(document.getElementById('pc-a-'+fid).value);
+  if(!(amt>0))return toast('Amount must be positive',1);
+  await api('/api/partner/cash','POST',{friend_id:fid,amount:amt,note:document.getElementById('pc-n-'+fid).value});
+  await loadPartner();drawPartner();refresh();toast('Cash entry saved ✓');};
+window.partnerCashDel=async(cid)=>{
+  await api('/api/partner/cash/'+cid,'DELETE');
+  await loadPartner();drawPartner();toast('Cash entry removed');};
 window.partnerSettleDel=async(sid)=>{
   await api('/api/partner/settle/'+sid,'DELETE');
   await loadPartner();drawPartner();toast('History entry removed');};
