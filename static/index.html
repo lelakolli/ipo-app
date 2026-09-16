@@ -1387,7 +1387,8 @@ window.drawPartner=()=>{
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap">
         <div style="min-width:0"><a role="link" style="color:var(--acc2);font-weight:750;text-decoration:underline;cursor:pointer;font-size:14.5px" onclick="goApps(${r.ipo_id})">${esc(r.name)}</a>
           <div class="mut" style="font-size:11.5px;margin-top:2px">${r.listing_date?('listing '+fd(r.listing_date)):'listing date soon'}</div></div>
-        <div style="display:flex;gap:6px;align-items:center">${badge(r.state)}
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${badge(r.state)}
+          <button class="btn sm" title="Enter the ONE total amount that hit the banks for this IPO (after taxes) — app prices every won lot & recomputes the split" onclick="netProceedsModal(${r.ipo_id})">💰 Net proceeds</button>
           <button class="btn sm ghost" title="Tap to change this IPO's split" onclick="pctModal(${r.ipo_id},${r.friend_id},${r.pct},${r.override?1:0})">🤝 ${first} ${num(r.pct)}%${r.override?'':'&nbsp;<span class="mut" style="font-size:10px">(def)</span>'}</button></div>
       </div>
       <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px;padding-top:9px">
@@ -1512,6 +1513,32 @@ window.partnerCopy=(el)=>{
     navigator.clipboard.writeText(v).then(()=>toast('📋 copied — '+v)).catch(()=>toast(v));}
   else toast(v);  // no clipboard API: at least show it for a long-press copy
 };
+window.netProceedsModal=(ipoId)=>{
+  const i=ipoById(ipoId)||{};
+  const won=S.applications.filter(a=>a.ipo_id===ipoId&&a.allotment==='allotted'&&(a.allotted_qty||0)>0);
+  if(!won.length)return toast('No winning lots recorded for this IPO yet',1);
+  const qty=won.reduce((s,a)=>s+(a.allotted_qty||0),0);
+  const cost=won.reduce((s,a)=>s+(a.amount||0),0);
+  const hasSells=won.some(a=>(a.sell_qty||0)>0);
+  openModal(`<h3>💰 ${esc(i.name||'IPO')} — net proceeds</h3>
+    <div class="mut" style="font-size:12.5px;padding-bottom:10px">Enter <b>ONE number</b>: the TOTAL rupees that actually hit the banks for this IPO's <b>${num(qty)} shares</b> (after STT &amp; charges). The app prices all <b>${won.length} won lot${won.length>1?'s':''}</b> at the same per-share net and recomputes everything — partner due, booked P&amp;L, dashboard. No tax math here, no ambiguity — your number is final.</div>
+    <div class="form-grid">
+      <div class="field"><label>Total net received (₹)</label><input id="np-amt" type="number" inputmode="decimal" placeholder="e.g. 35600"></div>
+      <div class="field"><label>Sold on</label><input id="np-date" type="date" value="${esc(S.today||'')}"></div>
+    </div>
+    <div class="mut" style="font-size:11.5px;padding-bottom:8px">cost basis of these lots: <b>${rs(cost)}</b> — enter less than that and the loss is shared at the same split.</div>
+    ${hasSells?'<div class="neg" style="font-size:12px;padding-bottom:8px">⚠️ some lots already have a sale price — applying replaces them (usually right: net beats gross).</div>':''}
+    <div class="foot"><button class="btn" onclick="netProceedsApply(${ipoId})">Apply &amp; recompute</button></div>`);};
+window.netProceedsApply=async(ipoId)=>{
+  const amt=parseFloat(document.getElementById('np-amt').value);
+  if(!(amt>0))return toast('Enter the total amount',1);
+  const sold_on=document.getElementById('np-date').value||'';
+  let r=await api('/api/partner/net_proceeds','POST',{ipo_id:ipoId,amount:amt,sold_on});
+  if(r&&r.needs_confirm){
+    if(!confirm(`${r.already_rows} won lot(s) already have a sale price — replace with the net-proceeds price?`))return;
+    r=await api('/api/partner/net_proceeds','POST',{ipo_id:ipoId,amount:amt,sold_on,confirm:true});}
+  if(r&&r.ok){closeModal();await loadPartner();drawPartner();refresh();
+    toast(`Applied across ${r.rows_updated} lot(s) at ₹${num(r.per_share)}/sh ✓ — due updated`);}};
 window.partnerAliasAdd=async(fid)=>{
   const lb=document.getElementById('pa-'+fid), dt=document.getElementById('pd-'+fid);
   const label=(lb.value||'').trim();

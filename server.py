@@ -3254,6 +3254,44 @@ def api_cash_del(cid: int):
     return partner_summary()
 
 
+@app.post("/api/partner/net_proceeds")
+def api_net_proceeds(b: dict = Body(...)):
+    """He enters ONE number — the TOTAL after-tax proceeds that actually hit
+    the banks for an IPO (per his rule: no tax math in the app, no ambiguity).
+    Every won lot gets the same per-share net price, so booked P&L, the
+    partner split AND the rest of the app (P&L tab, KPIs) all update in one
+    shot. Mixed funding stays exactly proportional: the partner's share rides
+    on his lots only. Already-priced lots need confirm=true (overwrite).
+    Model: everything sells on listing day — sell_qty = allotted_qty."""
+    iid = int(b.get("ipo_id") or 0)
+    amount = float(b.get("amount") or 0)
+    if amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+    if not rows("SELECT 1 x FROM ipos WHERE id=?", (iid,)):
+        raise HTTPException(404, "ipo not found")
+    won = rows("""SELECT * FROM applications WHERE ipo_id=? AND applied=1
+                   AND allotment='allotted' AND allotted_qty>0""", (iid,))
+    if not won:
+        raise HTTPException(400, "No winning lots recorded for this IPO yet")
+    qty = sum(a["allotted_qty"] or 0 for a in won)
+    already = [a for a in won if (a["sell_qty"] or 0) > 0]
+    if already and not b.get("confirm"):
+        return {"needs_confirm": True, "already_rows": len(already), "qty": qty,
+                "detail": f"{len(already)} won lot(s) already have a sale price — applying replaces them"}
+    ps = round(amount / qty, 4)
+    sold_on = (b.get("sold_on") or "").strip() or today_str()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", sold_on):
+        raise HTTPException(400, "sold_on must be YYYY-MM-DD")
+    with LOCK, get_db() as con:
+        for a in won:
+            con.execute("""UPDATE applications SET sell_price=?, sell_qty=allotted_qty,
+                            sold_on=? WHERE id=?""", (ps, sold_on, a["id"]))
+        con.commit()
+    backup_now()
+    return {"ok": True, "qty": qty, "per_share": ps, "rows_updated": len(won),
+            "sold_on": sold_on, "partner": partner_summary(iid)}
+
+
 @app.post("/api/partner/pct")
 def api_pct_set(b: dict = Body(...)):
     fid, iid = int(b.get("friend_id") or 0), int(b.get("ipo_id") or 0)
