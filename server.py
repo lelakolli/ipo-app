@@ -768,11 +768,81 @@ def bigshare_companies(force=False):
 
 
 
+# ---- Bigshare captcha solver (fix #20) ------------------------------------
+# Captcha.ashx returns JSON {token, image:data-url-b64-png}; the HMAC token is
+# single-use and bound to the session. ddddocr reads the picture (~85-90% per
+# attempt; a wrong digit costs one token — images are free, so we retry fresh
+# tokens until Status flips from CAPTCHA to a real answer).
+_BS_OCR = None
+
+
+def _bs_ocr():
+    global _BS_OCR
+    if _BS_OCR is None:
+        import ddddocr  # heavy (onnxruntime) — lazy so normal boots never pay it
+        _BS_OCR = ddddocr.DdddOcr(show_ad=False)
+    return _BS_OCR
+
+
+def _bs_read_captcha(ses):
+    """Fetch one captcha JSON and OCR the picture. Returns (token, answer|None)
+    — None = unreadable (token burns unused, image costs nothing)."""
+    r = ses.get(BS_ORIGIN + "/Captcha.ashx", params={"_": int(time.time() * 1000)},
+                headers={**UA, "Accept": "application/json"}, timeout=15)
+    r.raise_for_status()
+    j = r.json()
+    token = j.get("token") or ""
+    try:
+        img = base64.b64decode((j.get("image") or "").split(",", 1)[-1])
+        ans = re.sub(r"\D", "", _bs_ocr().classification(img) or "")
+    except Exception as e:
+        print("[bigshare] OCR read failed:", e, flush=True)
+        return token, None
+    return token, (ans if len(ans) == 6 else None)
+
+
+def _bs_captcha_search(match, pan, boid, max_tries=5):
+    """Full session flow: page GET (cookies) → captcha loop → FetchIpodetails.
+    Returns (Status, dict) — Status like OK / NOTFOUND / CAPTCHA / RATELIMIT /
+    WARMING or 'OCR_FAIL' when every picture stayed unreadable."""
+    ses = requests.Session()
+    ses.get(BS_PAGE, headers=UA, timeout=20)            # session cookies
+    last = None
+    for _ in range(max_tries):
+        tok, ans = _bs_read_captcha(ses)
+        if not ans:
+            last = last or "OCR_FAIL"
+            time.sleep(0.3)
+            continue
+        payload = {"Applicationno": "", "Company": match["id"],
+                   "SelectionType": "PN" if pan else "BN",
+                   "PanNo": pan, "txtcsdl": boid, "txtDPID": "", "txtClId": "",
+                   "ddlType": "" if pan else "CDSL", "lang": "en",
+                   "CaptchaToken": tok, "CaptchaAnswer": ans, "ResultToken": ""}
+        r = ses.post(BS_ORIGIN + "/Data.aspx/FetchIpodetails", json=payload,
+                     headers={**UA, "Content-Type": "application/json; charset=utf-8",
+                              "X-Requested-With": "XMLHttpRequest"}, timeout=20)
+        r.raise_for_status()
+        d = r.json().get("d")
+        if not isinstance(d, dict):
+            return "WALL", {}
+        st_ = d.get("Status") or ""
+        last = st_ or last
+        if st_ == "CAPTCHA":
+            time.sleep(0.35); continue          # token burned — fresh picture, retry
+        if st_ == "RATELIMIT":
+            time.sleep(8); continue             # polite: one soft back-off per attempt
+        if st_ == "WARMING":
+            time.sleep(3); continue
+        return st_, d
+    return (last if last != "CAPTCHA" else "OCR_FAIL"), {}
+
+
 def _bigshare_captcha_blocked(iid: int, mark: bool = False) -> bool:
-    """Bigshare's status form is captcha-gated (CaptchaToken/CaptchaAnswer +
-    ResultToken in its POST) — no app can auto-read it. Remember per-IPO so the
-    auto-sweeps stop burning 15 requests × 48×/day into a wall, while manual
-    taps still get ONE honest attempt."""
+    """Bigshare's status form is captcha-gated. With the OCR solver (below) a
+    mark now means "the solver exhausted fresh tokens TODAY" — a stale mark
+    must never silence tomorrow's sweep. Remember per-IPO (date-stamped) so
+    auto-sweeps stop burning requests into a known-wall day."""
     try:
         j = json.loads(kv_get("bigshare_captcha", "{}") or "{}")
     except (TypeError, ValueError):
@@ -780,7 +850,16 @@ def _bigshare_captcha_blocked(iid: int, mark: bool = False) -> bool:
     if mark:
         j[str(iid)] = today_str()
         kv_set("bigshare_captcha", json.dumps(j))
-    return str(iid) in j
+    return j.get(str(iid)) == today_str()
+
+
+def _bigshare_captcha_clear(iid: int):
+    try:
+        j = json.loads(kv_get("bigshare_captcha", "{}") or "{}")
+    except (TypeError, ValueError):
+        j = {}
+    if j.pop(str(iid), None) is not None:
+        kv_set("bigshare_captcha", json.dumps(j))
 
 
 def _bigshare_captcha_result(ipo):
@@ -818,60 +897,55 @@ def check_bigshare(ipo, acc, force=False):
                 "link": REGISTRAR_LINKS["Bigshare"]}
 
     pan = (acc.get("pan") or "").strip().upper()
-    cdsl = (acc.get("cdsl") or "").strip()
-    if not pan and not cdsl:
+    boid = re.sub(r"\D", "", acc.get("cdsl") or "")
+    if not pan and len(boid) != 16:
         return {"status": "manual", "note": "No PAN or CDSL BO ID stored for this account", "link": REGISTRAR_LINKS["Bigshare"]}
-
-    payload = {"Applicationno": (acc.get("app_no") or "").strip(),
-               "Company": match["id"],
-               "SelectionType": "PN" if pan else "BN",
-               "PanNo": pan,
-               "txtcsdl": cdsl, "txtDPID": "", "txtClId": "",
-               "ddlType": "", "lang": "en"}
+    if not pan and len(boid) == 16:
+        pan = ""           # BN/CDSL path uses the 16-digit BO ID
     try:
-        r = requests.post("https://ipo.bigshareonline.com/Data.aspx/FetchIpodetails",
-                          json=payload, timeout=20,
-                          headers={**UA, "Content-Type": "application/json; charset=utf-8",
-                                   "X-Requested-With": "XMLHttpRequest"})
-        r.raise_for_status()
-        d = r.json().get("d")
+        st_, d = _bs_captcha_search(match, pan, boid if not pan else "")
     except Exception as e:
-        blob_err = str(e).lower()
-        if "captcha" in blob_err or "500" in blob_err or "error" in blob_err:
-            _bigshare_captcha_blocked(ipo.get("id"), mark=True)
-            print(f"[bigshare] API rejected without captcha ({e}) — flagging captcha-walled", flush=True)
-            return _bigshare_captcha_result(ipo)
-        return {"status": "manual", "note": f"Bigshare API error ({e})", "link": REGISTRAR_LINKS["Bigshare"]}
-
-    b0 = json.dumps(d).lower()
-    if "captcha" in b0 or "invalid" in b0:
         _bigshare_captcha_blocked(ipo.get("id"), mark=True)
-        print("[bigshare] response demands captcha — flagging captcha-walled", flush=True)
-        return _bigshare_captcha_result(ipo)
-    if isinstance(d, str):
-        d = {"raw": d}
-    if not isinstance(d, dict):
-        _bigshare_captcha_blocked(ipo.get("id"), mark=True)
+        print(f"[bigshare] captcha-solve transport failed ({e}) — flagging walled today", flush=True)
         return _bigshare_captcha_result(ipo)
 
-    blob = json.dumps(d)
-    if "No data found" in blob:
-        return {"status": "not_found", "note": f"No record for this PAN/BO ID at {match['name']} — usually means NOT allotted (confirm once)", "matched_company": match["name"]}
-
-    # try to dig out allotted shares count from known field names
-    qty = 0
-    for k, v in d.items():
-        kl = str(k).lower()
-        if any(w in kl for w in ("allot", "share", "qty", "quantity")):
-            nums = re.findall(r"\d+", str(v).replace(",", ""))
-            if nums:
-                qty = max(qty, max(int(x) for x in nums))
-    if qty > 0:
-        return {"status": "ok", "allotted_qty": qty, "note": f"Allotted {qty} shares", "matched_company": match["name"]}
-    # record exists but couldn't parse qty — treat as allotted if any identifying field came back
-    if any(str(v).strip() for v in d.values() if isinstance(v, str) and "not" not in str(v).lower()[:6]):
-        return {"status": "manual", "note": "Record found but shares unclear — verify once: " + blob[:160], "matched_company": match["name"], "link": REGISTRAR_LINKS["Bigshare"]}
-    return {"status": "not_found", "note": "Empty record — likely not allotted", "matched_company": match["name"]}
+    if st_ == "OK":
+        _bigshare_captcha_clear(ipo.get("id"))
+        mc = d.get("MatchCount")
+        rec = d
+        try:
+            if mc and int(mc) > 1 and isinstance(d.get("Records"), list):
+                recs = d["Records"]
+                nm = norm_name(acc.get("holder") or "")
+                hit = next((x for x in recs if norm_name(x.get("Name") or "") == nm), None)
+                if not hit:
+                    return {"status": "manual", "matched_company": match["name"],
+                            "note": f"Bigshare shows {mc} records for this key — confirm once on the registrar page",
+                            "link": REGISTRAR_LINKS["Bigshare"]}
+                rec = hit
+        except (TypeError, ValueError):
+            pass
+        qty_m = re.sub(r"\D", "", str(rec.get("ALLOTED") or "0"))
+        app_m = re.sub(r"\D", "", str(rec.get("APPLIED") or "0"))
+        qty = int(qty_m) if qty_m else 0
+        if qty > 0:
+            return {"status": "ok", "allotted_qty": qty, "matched_company": match["name"],
+                    "note": f"Bigshare(auto): ALLOTTED {qty} shares"}
+        return {"status": "not_found", "matched_company": match["name"],
+                "note": f"Bigshare(auto): applied {app_m or '?'}, allotted 0"}
+    if st_ == "NOTFOUND":
+        _bigshare_captcha_clear(ipo.get("id"))
+        # ambiguous: results may still be uploading, or the account didn't apply
+        # with this key. NEVER commit a verdict on this — honest note, keep sweeping.
+        return {"status": "manual", "matched_company": match["name"],
+                "note": "Bigshare: no record for this key yet — results may still be uploading (or key mismatch); will keep checking"}
+    if st_ in ("OCR_FAIL", "CAPTCHA", "WALL"):
+        _bigshare_captcha_blocked(ipo.get("id"), mark=True)
+        print(f"[bigshare] OCR could not land a solve ({st_}) — flagging walled today", flush=True)
+        return _bigshare_captcha_result(ipo)
+    return {"status": "manual", "matched_company": match["name"],
+            "note": f"Bigshare answered {st_ or '?'} ({d.get('Message') or 'no detail'}) — retry in a minute",
+            "link": REGISTRAR_LINKS["Bigshare"]}
 
 
 def check_kfintech(ipo, acc, force=False):
