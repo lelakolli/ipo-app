@@ -704,6 +704,7 @@ REGISTRAR_LINKS = {
     "Link Intime": "https://in.mpms.mufg.com/Initial_Offer/public-issues.html",
     "KFin": "https://ipostatus.kfintech.com/",
     "Bigshare": "https://ipo.bigshareonline.com/ipo_status.html",
+    "Cameo": "https://appfrontend.cameoindia.in/",
     "Other": "",
 }
 
@@ -711,7 +712,8 @@ REGISTRAR_LINKS = {
 # Registrar allotment engines (best-effort, graceful fallbacks)
 # ----------------------------------------------------------------------------
 
-_cache = {"bigshare_companies": (0, []), "kfin_companies": (0, []), "mufg_companies": (0, [])}
+_cache = {"bigshare_companies": (0, []), "kfin_companies": (0, []), "mufg_companies": (0, []),
+          "cameo_companies": (0, [])}
 
 # --- MUFG Intime (prev Link Intime) — verified 2026-08-14 ----------------------
 MUFG_BASE = "https://in.mpms.mufg.com/Initial_Offer/IPO.aspx/"
@@ -1139,7 +1141,97 @@ def check_linkintime(ipo, acc, force=False):
             "matched_company": match["name"]}
 
 
-ENGINES = {"Bigshare": check_bigshare, "KFin": check_kfintech, "Link Intime": check_linkintime}
+# --- Cameo Corporate Services — verified live 2026-09-23 (ArMee Infotech) ----
+# Angular app (appfrontend.cameoindia.in) reads its API base from
+# /assets/config.json → CAMEO_API. Reverse-engineered contract:
+#   POST company/getcompany {} → [{code:"ARM", name:"ARMEE INFOTECH LIMITED"}]
+#   POST ipostatus {code, type:"pan"|"c"|"ano", value} → [] | rows
+#        row = {holder, allotedName, allotedShares, refundAmount, refundMode}
+# The on-screen "captcha" is 100% client-side (randomString painted onto a
+# canvas and validated in JS) — the API itself is open. [] = no row for the
+# key: results not out OR key didn't apply → NEVER commit on it (same rule as
+# Bigshare NOTFOUND). A row with allotedShares=0 is an explicit NOT-allotted.
+CAMEO_API = "https://appbackend.cameoindia.in/api/1.0"
+
+
+def cameo_companies(force=False):
+    ts, comps = _cache["cameo_companies"]
+    if not force and comps and time.time() - ts < 1800:
+        return comps
+    r = requests.post(CAMEO_API + "/company/getcompany", json={}, headers=UA, timeout=15)
+    r.raise_for_status()
+    comps = [{"id": (c.get("code") or "").strip(), "name": (c.get("name") or "").strip()}
+             for c in r.json() if isinstance(c, dict) and c.get("code")]
+    if comps:
+        _cache["cameo_companies"] = (time.time(), comps)
+    return comps
+
+
+def check_cameo(ipo, acc, force=False):
+    """Return dict(status, allotted_qty, note, matched_company) — same shape as
+    the other engines so run_allotment_checks commits it identically."""
+    pan = (acc.get("pan") or "").strip().upper()
+    boid = re.sub(r"\D", "", acc.get("cdsl") or "")
+    if not pan and len(boid) != 16:
+        return {"status": "manual", "note": "No PAN or CDSL BO ID stored for this account",
+                "link": REGISTRAR_LINKS["Cameo"]}
+    try:
+        comps = cameo_companies(force=force)
+    except Exception as e:
+        return {"status": "manual", "note": f"Cameo API unreachable ({e})",
+                "link": REGISTRAR_LINKS["Cameo"]}
+    target = norm_name(ipo["name"])
+    match = None
+    if ipo.get("registrar_ref"):
+        match = next((c for c in comps if c["id"] == str(ipo["registrar_ref"]).strip()), None)
+    if not match:
+        for c in comps:
+            if norm_name(c["name"]) == target:
+                match = c; break
+        if not match:
+            for c in comps:
+                n = norm_name(c["name"])
+                if target and (target in n or n in target):
+                    match = c; break
+    if not match:
+        return {"status": "manual", "note": "IPO not found in Cameo's live list (allotment not out yet, or different registrar?)",
+                "link": REGISTRAR_LINKS["Cameo"]}
+    key, typ, mode = (pan, "pan", "PAN") if pan else (boid, "c", "BO ID")
+    try:
+        r = requests.post(CAMEO_API + "/ipostatus",
+                          headers={**UA, "Content-Type": "application/json"},
+                          json={"code": match["id"], "type": typ, "value": key}, timeout=20)
+        r.raise_for_status()
+        recs = r.json()
+    except Exception as e:
+        return {"status": "manual", "note": f"Cameo API error ({e})", "link": REGISTRAR_LINKS["Cameo"]}
+    if not isinstance(recs, list):
+        return {"status": "manual", "matched_company": match["name"],
+                "note": "Cameo returned an unexpected response — retry in a bit"}
+    if not recs:
+        return {"status": "manual", "matched_company": match["name"],
+                "note": f"Cameo: no record for this {mode} yet — results may still be uploading; will keep checking"}
+    if len(recs) > 1:
+        nm = norm_name(acc.get("holder") or "")
+        hit = next((x for x in recs if norm_name(x.get("holder") or "") == nm), None)
+        if not hit:
+            return {"status": "manual", "matched_company": match["name"],
+                    "note": f"Cameo shows {len(recs)} records for this key — confirm once on the registrar page",
+                    "link": REGISTRAR_LINKS["Cameo"]}
+        rec = hit
+    else:
+        rec = recs[0]
+    qty_m = re.sub(r"\D", "", str(rec.get("allotedShares") or "0"))
+    qty = int(qty_m) if qty_m else 0
+    if qty > 0:
+        return {"status": "ok", "allotted_qty": qty, "matched_company": match["name"],
+                "note": f"Cameo({mode}): ALLOTTED {qty} shares"}
+    return {"status": "not_found", "matched_company": match["name"],
+            "note": f"Cameo({mode}): applied, allotted 0"}
+
+
+ENGINES = {"Bigshare": check_bigshare, "KFin": check_kfintech, "Link Intime": check_linkintime,
+           "Cameo": check_cameo}
 
 
 # ----------------------------------------------------------------------------
@@ -1202,6 +1294,8 @@ def _parse_loose_date(txt):
 
 def _registrar_from(html):
     low = html.lower()
+    if "cameo" in low:
+        return "Cameo"
     if "linkintime" in low or "link intime" in low or "mufg" in low:
         return "Link Intime"
     if "kfintech" in low or "kfin technologies" in low or "karvy" in low:
@@ -2428,6 +2522,8 @@ _ASSIST_REGS = {
                     "link": REGISTRAR_LINKS["Link Intime"]},
     "mufg":        {"label": "MUFG (Link Intime)", "engine": "Link Intime",
                     "link": REGISTRAR_LINKS["Link Intime"]},
+    "cameo":       {"label": "Cameo",              "engine": "Cameo",
+                    "link": REGISTRAR_LINKS["Cameo"]},
 }
 _ASSIST_FORCE_AT = {}   # ipo id -> epoch of last forced company-list refresh
 

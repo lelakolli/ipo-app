@@ -774,7 +774,7 @@ window.ipoModal=(id)=>{
   const i=id?ipoById(id):{name:'',registrar:'Bigshare',registrar_ref:'',open_date:'',close_date:'',price_min:'',price_max:'',lot_size:'',allotment_date:'',listing_date:'',board:'Mainboard',symbol:'',cmp:'',gmp:'',notes:''};
   openModal(`<h3>${id?'Edit':'Add'} IPO</h3><div class="form-grid">
     <div class="field full"><label>IPO name</label><input id="f-name" value="${esc(i.name)}" placeholder="e.g. WeWork India Management Ltd"></div>
-    <div class="field"><label>Registrar</label><select id="f-registrar">${['Bigshare','KFin','Link Intime','Other'].map(r=>`<option ${i.registrar===r?'selected':''}>${r}</option>`).join('')}</select></div>
+    <div class="field"><label>Registrar</label><select id="f-registrar">${['Bigshare','KFin','Link Intime','Cameo','Other'].map(r=>`<option ${i.registrar===r?'selected':''}>${r}</option>`).join('')}</select></div>
     <div class="field"><label>Board</label><select id="f-board"><option ${i.board==='Mainboard'?'selected':''}>Mainboard</option><option ${i.board==='SME'?'selected':''}>SME</option></select></div>
     <div class="field"><label>Open date</label><input id="f-open" type="date" value="${esc(i.open_date||'')}"></div>
     <div class="field"><label>Close date</label><input id="f-close" type="date" value="${esc(i.close_date||'')}"></div>
@@ -890,7 +890,7 @@ function renderApps(){
   if(!ipo){el.innerHTML='<div class="card mut">Add an IPO first (IPOs tab).</div>';return;}
   const accts=S.accounts.filter(a=>a.active||appFor(ipo.id,a.id));
   const regLow=(ipo.registrar||'').toLowerCase();
-  const assistPre=ipo.status==='listed'?null:(regLow==='bigshare'?'/bs/open':((regLow==='kfin'||regLow==='link intime'||regLow==='mufg')?'/assist/open':null));
+  const assistPre=ipo.status==='listed'?null:(regLow==='bigshare'?'/bs/open':((regLow==='kfin'||regLow==='link intime'||regLow==='mufg'||regLow==='cameo')?'/assist/open':null));
   const accName=a=>assistPre?(assistPre==='/bs/open'?`<a href="${assistPre}?ipo=${ipo.id}&acc=${a.id}" target="_blank" rel="noopener" title="Opens the real Bigshare page through the app — company + PAN pre-filled; you only read the captcha and tap SEARCH" style="color:var(--acc2);text-decoration:none;font-weight:700">${esc(a.holder)} 🔗</a>`:`<a href="${assistPre}?ipo=${ipo.id}&acc=${a.id}" target="_blank" rel="noopener" title="One-tap assisted check — the app reads the live ${esc(ipo.registrar)} record for this account; you see the result and file the verdict back with one tap" style="color:var(--acc2);text-decoration:none;font-weight:700">${esc(a.holder)} 🔗</a>`):`<b>${esc(a.holder)}</b>`;
   const rowsHtml=accts.map(a=>{
     const ap=appFor(ipo.id,a.id)||{applied:0,lots:1,amount:0,upi:a.upi,mandate_status:'pending',allotment:'pending',allotted_qty:0,refund:'na',sell_qty:0,sell_price:0,sold_on:'',app_no:''};
@@ -1125,7 +1125,7 @@ window.runAllotmentCheck=async()=>{
       </div>
       <div>${r.results.map(x=>`<a class="btn sm" style="margin:2px 5px 2px 0" href="/bs/open?ipo=${ipo.id}&acc=${x.account_id}" target="_blank" rel="noopener">🔗 ${esc(x.holder)}</a>`).join('')}</div></div>`:'';
     const rgLow=(ipo.registrar||'').toLowerCase();
-    const assRow=ipo.status==='listed'?null:((rgLow==='kfin'||rgLow==='link intime'||rgLow==='mufg')?`/assist/open?ipo=${ipo.id}&acc=`:null);
+    const assRow=ipo.status==='listed'?null:((rgLow==='kfin'||rgLow==='link intime'||rgLow==='mufg'||rgLow==='cameo')?`/assist/open?ipo=${ipo.id}&acc=`:null);
     box.innerHTML=capCard+r.results.map(x=>{
       const col=x.status==='ok'?'var(--grn)':(x.status==='not_found'||x.status==='captcha'?'var(--amb)':'var(--mut)');
       const lbl=x.status==='ok'?`✅ Allotted ${x.allotted_qty||''} sh`:(x.status==='not_found'?'❌ No allotment record':(x.status==='captcha'?'🧩 Verify manually (captcha)':(x.status==='manual'?'🖐 Check manually':'⚠ '+x.status)));
