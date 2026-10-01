@@ -770,116 +770,52 @@ def bigshare_companies(force=False):
 
 
 
-# ---- Bigshare captcha solver (fix #20) ------------------------------------
-# Captcha.ashx returns JSON {token, image:data-url-b64-png}; the HMAC token is
-# single-use and bound to the session. ddddocr reads the picture (~85-90% per
-# attempt; a wrong digit costs one token — images are free, so we retry fresh
-# tokens until Status flips from CAPTCHA to a real answer).
-_BS_OCR = None
+# ---- Bigshare no-captcha search (fix #22) ---------------------------------
+# Bigshare redesigned ipo_status.html (late Sep 2026): the captcha is GONE.
+# Their page posts only Applicationno/Company/SelectionType/PanNo/txtcsdl/
+# txtDPID/txtClId/ddlType/lang to Data.aspx/FetchIpodetails — their own JS
+# literally comments "No captcha" — and the old captcha endpoint now 302s
+# into an error page, so the fix-#20 OCR ladder (ddddocr) is dead weight. Status vocabulary
+# is unchanged (OK / NOTFOUND / RATELIMIT / WARMING); 429/503 = hard throttle.
 
 
-def _bs_ocr():
-    global _BS_OCR
-    if _BS_OCR is None:
-        import ddddocr  # heavy (onnxruntime) — lazy so normal boots never pay it
-        _BS_OCR = ddddocr.DdddOcr(show_ad=False)
-    return _BS_OCR
-
-
-def _bs_read_captcha(ses):
-    """Fetch one captcha JSON and OCR the picture. Returns (token, answer|None)
-    — None = unreadable (token burns unused, image costs nothing)."""
-    r = ses.get(BS_ORIGIN + "/Captcha.ashx", params={"_": int(time.time() * 1000)},
-                headers={**UA, "Accept": "application/json"}, timeout=15)
-    r.raise_for_status()
-    j = r.json()
-    token = j.get("token") or ""
-    try:
-        img = base64.b64decode((j.get("image") or "").split(",", 1)[-1])
-        ans = re.sub(r"\D", "", _bs_ocr().classification(img) or "")
-    except Exception as e:
-        print("[bigshare] OCR read failed:", e, flush=True)
-        return token, None
-    return token, (ans if len(ans) == 6 else None)
-
-
-def _bs_captcha_search(match, pan, boid, max_tries=5):
-    """Full session flow: page GET (cookies) → captcha loop → FetchIpodetails.
-    Returns (Status, dict) — Status like OK / NOTFOUND / CAPTCHA / RATELIMIT /
-    WARMING or 'OCR_FAIL' when every picture stayed unreadable."""
+def _bs_lookup(match, pan, boid, max_tries=4):
+    """Session GET (cookies) -> POST the captcha-free search contract, with a
+    polite back-off ladder for RATELIMIT/WARMING. Returns (Status, dict)."""
     ses = requests.Session()
     ses.get(BS_PAGE, headers=UA, timeout=20)            # session cookies
-    last = None
+    payload = {"Applicationno": "", "Company": match["id"],
+               "SelectionType": "PN" if pan else "BN",
+               "PanNo": pan, "txtcsdl": boid, "txtDPID": "", "txtClId": "",
+               "ddlType": "" if pan else "CDSL", "lang": "en"}
+    last = ""
     for _ in range(max_tries):
-        tok, ans = _bs_read_captcha(ses)
-        if not ans:
-            last = last or "OCR_FAIL"
-            time.sleep(0.3)
-            continue
-        payload = {"Applicationno": "", "Company": match["id"],
-                   "SelectionType": "PN" if pan else "BN",
-                   "PanNo": pan, "txtcsdl": boid, "txtDPID": "", "txtClId": "",
-                   "ddlType": "" if pan else "CDSL", "lang": "en",
-                   "CaptchaToken": tok, "CaptchaAnswer": ans, "ResultToken": ""}
         r = ses.post(BS_ORIGIN + "/Data.aspx/FetchIpodetails", json=payload,
                      headers={**UA, "Content-Type": "application/json; charset=utf-8",
                               "X-Requested-With": "XMLHttpRequest"}, timeout=20)
+        if r.status_code in (429, 503):
+            last = "RATELIMIT"; time.sleep(8); continue     # hard throttle
         r.raise_for_status()
         d = r.json().get("d")
         if not isinstance(d, dict):
             return "WALL", {}
         st_ = d.get("Status") or ""
-        last = st_ or last
-        if st_ == "CAPTCHA":
-            time.sleep(0.35); continue          # token burned — fresh picture, retry
         if st_ == "RATELIMIT":
-            time.sleep(8); continue             # polite: one soft back-off per attempt
+            last = st_; time.sleep(8); continue     # their page locks 30 s; we try 8-s steps
         if st_ == "WARMING":
-            time.sleep(3); continue
-        return st_, d
-    return (last if last != "CAPTCHA" else "OCR_FAIL"), {}
+            last = st_; time.sleep(3); continue
+        return st_ or "?", d
+    return (last or "?"), {}
 
-
-def _bigshare_captcha_blocked(iid: int, mark: bool = False) -> bool:
-    """Bigshare's status form is captcha-gated. With the OCR solver (below) a
-    mark now means "the solver exhausted fresh tokens TODAY" — a stale mark
-    must never silence tomorrow's sweep. Remember per-IPO (date-stamped) so
-    auto-sweeps stop burning requests into a known-wall day."""
-    try:
-        j = json.loads(kv_get("bigshare_captcha", "{}") or "{}")
-    except (TypeError, ValueError):
-        j = {}
-    if mark:
-        j[str(iid)] = today_str()
-        kv_set("bigshare_captcha", json.dumps(j))
-    return j.get(str(iid)) == today_str()
-
-
-def _bigshare_captcha_clear(iid: int):
-    try:
-        j = json.loads(kv_get("bigshare_captcha", "{}") or "{}")
-    except (TypeError, ValueError):
-        j = {}
-    if j.pop(str(iid), None) is not None:
-        kv_set("bigshare_captcha", json.dumps(j))
-
-
-def _bigshare_captcha_result(ipo):
-    return {"status": "captcha",
-            "note": "Bigshare asks a captcha before every search — no app can auto-read it. "
-                    "Open the registrar page, check each PAN, then tap the Allotment cell of that row here.",
-            "link": REGISTRAR_LINKS["Bigshare"], "matched_company": ipo.get("name", "")}
 
 def check_bigshare(ipo, acc, force=False):
     """Return dict(status, allotted_qty, note, matched_company)."""
-    if _bigshare_captcha_blocked(ipo.get("id")):
-        return _bigshare_captcha_result(ipo)
     try:
         comps = bigshare_companies(force=force)
     except Exception as e:
-        _bigshare_captcha_blocked(ipo.get("id"), mark=True)
-        print(f"[bigshare] page probe failed, treating as captcha-walled: {e}", flush=True)
-        return _bigshare_captcha_result(ipo)
+        print(f"[bigshare] company list unreachable: {e}", flush=True)
+        return {"status": "manual", "note": "Bigshare page is unreachable right now — retry in a few minutes",
+                "link": REGISTRAR_LINKS["Bigshare"]}
     target = norm_name(ipo["name"])
     match = None
     if ipo.get("registrar_ref"):
@@ -905,14 +841,14 @@ def check_bigshare(ipo, acc, force=False):
     if not pan and len(boid) == 16:
         pan = ""           # BN/CDSL path uses the 16-digit BO ID
     try:
-        st_, d = _bs_captcha_search(match, pan, boid if not pan else "")
+        st_, d = _bs_lookup(match, pan, boid if not pan else "")
     except Exception as e:
-        _bigshare_captcha_blocked(ipo.get("id"), mark=True)
-        print(f"[bigshare] captcha-solve transport failed ({e}) — flagging walled today", flush=True)
-        return _bigshare_captcha_result(ipo)
+        print(f"[bigshare] search transport failed: {e}", flush=True)
+        return {"status": "manual", "matched_company": match["name"],
+                "note": "Bigshare search failed mid-flight — retry in a minute",
+                "link": REGISTRAR_LINKS["Bigshare"]}
 
     if st_ == "OK":
-        _bigshare_captcha_clear(ipo.get("id"))
         mc = d.get("MatchCount")
         rec = d
         try:
@@ -936,15 +872,15 @@ def check_bigshare(ipo, acc, force=False):
         return {"status": "not_found", "matched_company": match["name"],
                 "note": f"Bigshare(auto): applied {app_m or '?'}, allotted 0"}
     if st_ == "NOTFOUND":
-        _bigshare_captcha_clear(ipo.get("id"))
-        # ambiguous: results may still be uploading, or the account didn't apply
-        # with this key. NEVER commit a verdict on this — honest note, keep sweeping.
+        # ambiguous: results may still be uploading, the account didn't apply
+        # with this key, or (for already-LISTED IPOs) the registrar purged the
+        # rows. NEVER commit a verdict on this — honest note, keep sweeping.
         return {"status": "manual", "matched_company": match["name"],
                 "note": "Bigshare: no record for this key yet — results may still be uploading (or key mismatch); will keep checking"}
-    if st_ in ("OCR_FAIL", "CAPTCHA", "WALL"):
-        _bigshare_captcha_blocked(ipo.get("id"), mark=True)
-        print(f"[bigshare] OCR could not land a solve ({st_}) — flagging walled today", flush=True)
-        return _bigshare_captcha_result(ipo)
+    if st_ in ("RATELIMIT", "WARMING"):
+        return {"status": "manual", "matched_company": match["name"],
+                "note": f"Bigshare is {'rate-limiting' if st_ == 'RATELIMIT' else 'warming up'} — auto-retries from the background sweep",
+                "link": REGISTRAR_LINKS["Bigshare"]}
     return {"status": "manual", "matched_company": match["name"],
             "note": f"Bigshare answered {st_ or '?'} ({d.get('Message') or 'no detail'}) — retry in a minute",
             "link": REGISTRAR_LINKS["Bigshare"]}
@@ -1869,7 +1805,7 @@ if CONF_FILE.exists():
     CONF = json.loads(CONF_FILE.read_text())
 else:
     CONF = {"passcode": f"{secrets.randbelow(900000) + 100000}"}
-    print("[boot] FIRST-RUN PASSCODE:", CONF["passcode"], flush=True)
+    print("[boot] FIRST-RUN PASSCODE for this public instance:", CONF["passcode"], flush=True)
     try:
         CONF_FILE.write_text(json.dumps(CONF))
     except Exception:
@@ -2120,14 +2056,15 @@ def _client_ip(request):
 
 # ---------------------------------------------------------------------------
 # Bigshare assisted manual check.
-# Bigshare gates every search behind a human-read captcha, so no engine can
-# auto-read it. /bs/open serves the registrar's REAL page through us — keeping
-# it same-origin so the captcha image + search AJAX keep working — with the
-# company, selection type and PAN/BO-ID already filled in. The user only reads
-# one picture and taps SEARCH. Everything the page needs afterwards (assets,
-# Captcha.ashx, Data.aspx/FetchIpodetails) flows through /bs/p/... which
-# forwards to Bigshare, so their cookies/rate-limits behave exactly like a
-# direct visit. We save the typing — never the human check.
+# Since the Sep-2026 redesign Bigshare's search needs NO captcha at all (their
+# own JS says so; the payload carries no captcha fields), so this page is now
+# nearly one-tap: /bs/open serves the registrar's REAL page through us —
+# same-origin so its search AJAX keeps working — with the company, selection
+# type and PAN/BO-ID already filled in. The user just taps SEARCH, then sends
+# the verdict back with one more tap. Everything the page needs (assets,
+# Data.aspx/FetchIpodetails) flows through /bs/p/... which forwards to
+# Bigshare, so their cookies/rate-limits behave exactly like a direct visit.
+# We save the typing — never the human decision.
 # ---------------------------------------------------------------------------
 BS_ORIGIN = "https://ipo.bigshareonline.com"
 BS_PAGE = BS_ORIGIN + "/ipo_status.html"
@@ -2187,8 +2124,8 @@ def _bs_match_company(options, ipo):
 
 
 # Injected at the end of the proxied page: waits for the company list, selects
-# our IPO, picks PAN (or BO ID) mode, fills the value, lands the cursor on the
-# captcha box and pins a guidance bar. Pure vanilla JS — jQuery may lag behind.
+# our IPO, picks PAN (or BO ID) mode, fills the value and pins a guidance bar.
+# Pure vanilla JS — jQuery may lag behind. No captcha exists here anymore.
 _BS_FILL_SCRIPT = """<script>(function(){
 var F=window.__BSFILL__||{},tries=0;
 function bar(html){var d=document.getElementById('ipoassistbar');
@@ -2206,28 +2143,7 @@ m.onclick=function(){var sp=d.querySelector('span');var w=document.getElementByI
 d.appendChild(m);
 (document.body||document.documentElement).appendChild(d);}
 d.querySelector('span').innerHTML=html;}
-// captcha watchdog (IIFE scope — go() and the lite-mode buttons both use it):
-// their own loader needs jQuery (CDN-first) and one clean round-trip through
-// us — either can hiccup on a cold host or a fast tap. If the picture is not
-// there ~2s after load, fetch it ourselves (no jQuery needed), retry up to
-// ~18 times, then admit it honestly with a manual way out.
-var capTries=0;
-function captchaLoaded(){var img=document.getElementById('captcha');return !!(img&&String(img.getAttribute('src')||'').length>60);}
-function watchCaptcha(force){
-  if(!force&&captchaLoaded())return;
-  if(++capTries>18){bar('⚠ Captcha still not loading — tap the ↻ button next to the picture, or reload this page (the free host wakes slowly on the first open).');return;}
-  if(!force)bar('⏳ Captcha picture coming slowly — retrying… ('+capTries+')');
-  else bar('⏳ Getting you a fresh captcha picture…');
-  fetch('Captcha.ashx?_='+Date.now(),{cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();}).then(function(j){
-    var b=j.image||j.Image,t=j.token||j.Token;
-    if(!b){throw new Error('empty');}
-    var el=document.getElementById('captcha');if(el){el.setAttribute('src',b);}
-    try{captchaToken=t;}catch(e){try{window.captchaToken=t;}catch(_){}}
-    var inp=document.getElementById('captcha-input');if(inp){inp.value='';if(force){try{inp.focus();}catch(e){}}}
-    window.__capN=(window.__capN||0)+1;
-    bar('✅ Captcha picture #'+window.__capN+' loaded (fresh, just now) — type what you see in the box and tap <b>SEARCH</b>.');
-  }).catch(function(){if(force){bar('⚠ Could not get a fresh picture just now — tap ↻ once more.');}setTimeout(function(){watchCaptcha();},2600);});
-}
+// fix #22: Bigshare removed the captcha entirely — no picture to babysit.
 // The value boxes (#PanNumber / #CDSLContent / #dp_sec / #ApplicationNo) start
 // display:none and their page only reveals them via jQuery change handlers.
 // We never rely on that: syncVis() mirrors the same show/hide matrix in plain
@@ -2237,23 +2153,6 @@ function syncVis(){var hd=function(id,on){var z=document.getElementById(id);if(z
  var t2='';try{t2=(document.getElementById('ddlType')||{}).value||'';}catch(e){}
  hd('PanNumber',v==='PN');hd('ApplicationNo',v==='AP');hd('BeneficiaryId',v==='BN');
  hd('CDSLContent',v==='BN'&&t2==='CDSL');hd('dp_sec',v==='BN'&&t2==='NSDL');}
-// Permanent ↻ captcha-refresh button NEXT TO the picture: their refresh icon
-// is a glyph from remixicon.css served off cdn.jsdelivr.net — external CDNs
-// (googleapis jQuery too) demonstrably fail on this user's network, leaving a
-// zero-content invisible button. Ours is a plain text character: it renders
-// even if every CDN is down, and it never needs jQuery.
-var capUiTries=0;
-function installCapUi(){
-  var img=document.getElementById('captcha');
-  if(!img){if(++capUiTries<40)setTimeout(installCapUi,300);return;}
-  if(document.getElementById('ipoassist-cap'))return;
-  var b=document.createElement('button');b.id='ipoassist-cap';b.type='button';b.title='New captcha picture';
-  b.textContent='↻';
-  b.style.cssText='display:inline-flex;align-items:center;justify-content:center;width:46px;height:46px;font-size:23px;line-height:1;background:#ffffff;border:2px solid #0b3570;border-radius:9px;margin-left:8px;color:#0b3570;cursor:pointer;vertical-align:middle';
-  b.onclick=function(){capTries=0;watchCaptcha(1);};
-  img.parentNode.insertBefore(b,img.nextSibling);
-}
-setTimeout(installCapUi,800);
 // SEARCH: ONE code path for everyone, bound in the capture phase. Their own
 // handler lives inside jQuery — and on this user's devices that dependency has
 // failed in three different ways (dead button; the old "self-heal" guard
@@ -2292,12 +2191,7 @@ try{syncVis();}catch(e){}
 var co=sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].text:'';
 bar((okCo?'\u2705 <b>'+co+'</b> selected':'\u26A0 <b>'+(F.companyName||'')+'</b> is <b>not in Bigshare\u2019s dropdown yet</b> — their list shows only <b>'+Math.max(0,(sel.options||[]).length-1)+'</b> live issue(s) right now. Allotment pages usually flip late in the evening — nothing is broken, recheck later tonight. The app\u2019s auto-check also keeps polling the registrar.')
 +'<br>'+(f2?f2+' for <b>'+(F.accName||'')+'</b>.':'No PAN/BO ID stored for <b>'+(F.accName||'')+'</b> \u2014 type it yourself.')
-+'<br>Now just read the captcha picture and tap <b>SEARCH</b>.');
-setTimeout(watchCaptcha,2200);
-var rf=document.getElementById('refresh-captcha');
-if(rf){rf.addEventListener('click',function(){setTimeout(function(){if(!captchaLoaded()){capTries=0;watchCaptcha();}},1500);});}
-var cap=document.getElementById('captcha-input');
-if(cap){setTimeout(function(){try{cap.scrollIntoView({block:'center'});cap.focus();}catch(e){}},700);}
++'<br><b>No captcha needed here anymore</b> \\ud83c\\udf89 company and PAN are already filled; just tap <b>SEARCH</b>.');
 // once a result (or the "No Record" popup) is on screen, offer the one-tap verdict
 var poll=setInterval(function(){
 var dp=document.getElementById('dPrint');
@@ -2334,7 +2228,7 @@ allotment:allotted?'allotted':'not_allotted',allotted_qty:allotted?qty:0})})
 // ---------------------------------------------------------------------------
 // LITE MODE — their page's SEARCH / refresh / CLEAR live inside jQuery, which
 // comes from the Google CDN FIRST. On a slow phone network jQuery never lands,
-// the buttons go dead, the captcha has no refresh, and the empty result table
+// the buttons go dead and the empty result table
 // stays visible. Detect once (~3s) and re-wire the essentials in plain JS —
 // same endpoints, same payload contract as their own code. If jQuery is fine,
 // we stand down and their page works natively.
@@ -2344,32 +2238,25 @@ function st(id,v){var e=document.getElementById(id);if(e)e.textContent=(v==null?
 var searchBusy=false;
 function liteSearch(){
   if(searchBusy)return;searchBusy=true;
-  var co=gv('ddlCompany'),st0=gv('SelectionType'),ans=gv('captcha-input');
+  var co=gv('ddlCompany'),st0=gv('SelectionType');
   if(!co||co==='--Select Company--'||co==='0'){searchBusy=false;bar('⚠ Pick the company from the list first.');return;}
-  var tok='';try{tok=captchaToken||'';}catch(e){try{tok=window.captchaToken||'';}catch(_){}}
-  if(!tok||!ans){searchBusy=false;bar('⚠ Type the CODE from the captcha picture first.');if(!tok){capTries=0;watchCaptcha();}return;}
+  if(!st0||st0==='0'){searchBusy=false;bar('⚠ Pick the search mode (PAN / application / beneficiary) first.');return;}
   var payload={Applicationno:gv('txtapplication'),Company:co,SelectionType:st0,PanNo:gv('txtpan'),
     txtcsdl:gv('txtcsdl'),txtDPID:gv('txtDPID'),txtClId:gv('txtClId'),ddlType:gv('ddlType'),
-    lang:gv('ddllang'),CaptchaToken:tok,CaptchaAnswer:ans,ResultToken:''};
-  bar('⏳ Searching Bigshare…');
+    lang:gv('ddllang')||'en'};
+  bar('⏳ Searching Bigshare — no captcha needed 🎉…');
   fetch('Data.aspx/FetchIpodetails',{method:'POST',headers:{'Content-Type':'application/json; charset=utf-8'},body:JSON.stringify(payload)})
   .then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();})
   .then(function(d){
     searchBusy=false;
     var C=(d&&d.d)||{};var cs=C.Status||'';
-    if(C.ResultToken){try{resultToken=C.ResultToken;}catch(e){try{window.resultToken=C.ResultToken;}catch(_){}}}
     if(cs&&cs!=='OK'&&cs!=='NOTFOUND'){
-      capTries=0;setTimeout(watchCaptcha,300);
       var msg=C.Message||'Please try again.';
-      if(cs==='CAPTCHA')msg='Wrong captcha code — a fresh picture loaded below; retype it and SEARCH again.';
-      if(cs==='RATELIMIT')msg='Bigshare is rate-limiting — wait ~30 seconds and try again.';
+      if(cs==='RATELIMIT')msg='Bigshare is rate-limiting — wait ~30 seconds and tap SEARCH again.';
       if(cs==='WARMING')msg='Bigshare is warming up — try again in a few seconds.';
-      var lb=document.getElementById('captcha-input');if(lb)lb.value='';
       bar('⚠ '+msg);return;}
     if(cs==='NOTFOUND'){
-      var lb2=document.getElementById('captcha-input');if(lb2)lb2.value='';
-      capTries=0;setTimeout(watchCaptcha,300);
-      bar('❌ No Record Found for this PAN — either this account did not apply, or the registrar has no row yet. If you are sure you applied, recheck the PAN.');return;}
+      bar('❌ No Record Found for this key — either this account did not apply, or the registrar has no row yet. If you are sure you applied, recheck the PAN / BO ID.');return;}
     st('lbl1',C.APPLICATION_NO);st('lbl2',C.DPID);st('lbl3',C.Name);st('lbl4',C.APPLIED);st('lbl5',C.ALLOTED);
     st('th1',C.H_APPLICATION_NO||'Application No');st('th2',C.H_DPID||'DP ID/CL ID or Folio');st('th3',C.H_Name||'Name');st('th4',C.H_APPLIED||'Applied');st('th5',C.H_ALLOTED||'Alloted');
     var dm=document.getElementById('dMore');
@@ -2384,13 +2271,8 @@ function liteSearch(){
   .catch(function(e){searchBusy=false;bar('⚠ Search failed ('+e.message+') — tap SEARCH again.');});
 }
 setTimeout(function(){
-  try{watchCaptcha();}catch(e){}
   try{if(window.jQuery)return;}catch(e){}
-  bar('⚠ Their page scripts did not load (slow network) — <b>lite mode on</b>: the visible buttons below do the same job.');
-  var rf=document.getElementById('refresh-captcha');
-  if(rf){rf.innerHTML='&#8635;';rf.title='New captcha';
-    rf.style.cssText='display:inline-flex;align-items:center;justify-content:center;min-width:42px;min-height:42px;font-size:22px;background:#ffffff;border:1px solid #c8d2dc;border-radius:8px;margin-left:6px;color:#123;cursor:pointer';
-    rf.addEventListener('click',function(){capTries=0;watchCaptcha(1);});}
+  bar('⚡ <b>No captcha anymore</b> — company and PAN are already filled; just tap <b>SEARCH</b>.');
   var bc=document.getElementById('btn_clear');
   if(bc){bc.addEventListener('click',function(){location.reload();});}
   var s0=document.getElementById('SelectionType');if(s0)s0.addEventListener('change',function(){try{syncVis();}catch(e){}});
@@ -2491,7 +2373,7 @@ async def bs_proxy(upath: str, request: Request):
     if r.headers.get("content-type"):
         resp.headers["content-type"] = r.headers["content-type"]
     if url.rsplit("?", 1)[0].lower().endswith((".ashx", ".aspx")) or "Data.aspx" in url:
-        # captcha JSON / search responses must NEVER be cached — otherwise a
+        # search responses must NEVER be cached — otherwise a
         # page refresh shows yesterday's picture while the token has moved on.
         resp.headers["cache-control"] = "no-store"
         resp.headers["pragma"] = "no-cache"
@@ -2536,7 +2418,7 @@ def _assist_meta(ipo: dict):
 def assist_query(ipo: int = 0, acc: int = 0):
     """Run the registrar engine for ONE account, force-fresh company list, and
     return the raw verdict the assisted page renders. Writes nothing — the
-    human still taps to save, exactly like the Bigshare captcha flow."""
+    human still taps to save, exactly like the Bigshare assisted flow."""
     ipo_r = rows("SELECT * FROM ipos WHERE id=?", (ipo,))
     acc_r = rows("SELECT * FROM accounts WHERE id=?", (acc,))
     if not ipo_r or not acc_r:
@@ -4475,8 +4357,6 @@ def scheduler():
                     for p in rows("SELECT * FROM ipos"):
                         if ipo_status(p) != "result_pending" or p["registrar"] not in ENGINES:
                             continue
-                        if p["registrar"] == "Bigshare" and _bigshare_captcha_blocked(p["id"]):
-                            continue  # captcha wall — auto-sweeping is pointless, user checks manually
                         if not rows("""SELECT 1 x FROM applications
                                        WHERE ipo_id=? AND applied=1 AND allotment='pending' LIMIT 1""",
                                     (p["id"],)):
