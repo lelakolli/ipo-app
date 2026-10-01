@@ -624,7 +624,7 @@ def run(sql, args=()):
 
 
 def norm_name(s: str) -> str:
-    s = s.upper()
+    s = s.upper().replace("&", " AND ")
     s = re.sub(r"\b(LIMITED|LTD|IPO|INDIA|IND)\b\.?", "", s)
     s = re.sub(r"[^A-Z0-9]", "", s)
     return s
@@ -753,17 +753,41 @@ RESULT_TEMPLATES = {
 }
 
 
+# fix #23: the primary server's DROPDOWN lags days behind on fresh issues
+# (their redesign ships them to the mirror servers first), while the search
+# backend itself is global and answers for every company id on any mirror.
+# The page itself advertises the mirrors as SERVER 2 / SERVER 3 — merge the
+# dropdowns of all three so a just-published company never reads as
+# "not in Bigshare live list".
+BS_MIRRORS = ("https://ipo.bigshareonline.com",
+              "https://ipo1.bigshareonline.com",
+              "https://ipo2.bigshareonline.com")
+
+
 def bigshare_companies(force=False):
     ts, comps = _cache["bigshare_companies"]
     if not force and comps and time.time() - ts < 1800:
         return comps
-    r = requests.get("https://ipo.bigshareonline.com/", headers=UA, timeout=15)
-    r.raise_for_status()
-    m = re.search(r'<select id="ddlCompany">(.*?)</select>', r.text, re.S)
-    comps = []
-    if m:
+    seen = {}
+    ok_any = False
+    last_err = None
+    for origin in BS_MIRRORS:
+        try:
+            r = requests.get(origin + "/ipo_status.html", headers=UA, timeout=15)
+            r.raise_for_status()
+        except Exception as e:
+            last_err = e
+            continue
+        ok_any = True
+        m = re.search(r'<select id="ddlCompany">(.*?)</select>', r.text, re.S)
+        if not m:
+            continue
         for val, name in re.findall(r'<option value="(\d+)">([^<]+)</option>', m.group(1)):
-            comps.append({"id": val, "name": name.strip()})
+            if val not in seen:
+                seen[val] = {"id": val, "name": name.strip()}
+    if not ok_any:
+        raise (last_err or RuntimeError("no Bigshare mirror reachable"))
+    comps = [seen[k] for k in sorted(seen, key=int)]
     _cache["bigshare_companies"] = (time.time(), comps)
     return comps
 
