@@ -1,4 +1,4 @@
-const CACHE = 'ipo-center-v33';
+const CACHE = 'ipo-center-v34';
 const SHELL = ['/', '/manifest.json', '/static/icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
