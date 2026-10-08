@@ -1372,11 +1372,18 @@ def _ipoji_subs():
                 return float(v)
             except (TypeError, ValueError):
                 return None
-        recs[norm_name(name)] = {"name": name, "close_txt": cells[1],
-                                 "qib": f(cells[2]), "shni": f(cells[3]),
-                                 "bhni": f(cells[4]), "nii": f(cells[5]),
-                                 "rii": f(cells[6]), "emp": f(cells[7]),
-                                 "others": f(cells[8]), "total": f(cells[9])}
+        key = norm_name(name)
+        if len(key) < 3:
+            # nameless artifact rows (their responsive table re-emits a
+            # closed IPO's numbers with an empty name cell) — a blank key
+            # would substring-match EVERYTHING downstream ('' in t is True)
+            # and stamp phantom subscriptions onto unrelated IPOs (fix #25).
+            continue
+        recs[key] = {"name": name, "close_txt": cells[1],
+                     "qib": f(cells[2]), "shni": f(cells[3]),
+                     "bhni": f(cells[4]), "nii": f(cells[5]),
+                     "rii": f(cells[6]), "emp": f(cells[7]),
+                     "others": f(cells[8]), "total": f(cells[9])}
     return recs
 
 
@@ -1415,7 +1422,9 @@ def _chittorgarh_live_subs():
                     elif "total" in key:        rec["total"] = num
                 if rec:
                     lab = re.sub(r"\s*\(BSE\)|\s*\(NSE\)|\s*IPO\s*$", "", label, flags=re.I)
-                    out[norm_name(lab)] = rec
+                    key = norm_name(lab)
+                    if len(key) >= 3:   # same anti-phantom floor as _ipoji_subs (fix #25)
+                        out[key] = rec
                 break
         except Exception:
             continue
@@ -1424,8 +1433,19 @@ def _chittorgarh_live_subs():
 
 def refresh_subscriptions():
     """Merge feeds every 15 min: Chittorgarh (exchange-sourced) wins for
-       QIB/NII/Retail/Total; IPO Ji supplies the sHNI/bHNI split + finals."""
-    ipos_local = rows("SELECT id, name, sub_json FROM ipos")
+       QIB/NII/Retail/Total; IPO Ji supplies the sHNI/bHNI split + finals.
+
+       Safety rules (fix #25 — phantom-subscription incident, 2026-10-08):
+       * an IPO is only ever matched while it is inside its open window
+         (open_date .. close_date + 1d for late finals): an UPCOMING or
+         dateless IPO can never have genuine subscription numbers;
+       * the fuzzy fallback demands >=5 chars on the SHORTER side,
+         so junk pool keys ('', 'JIO', 'FIRE') can no longer substring-match
+         unrelated IPOs ('' in t is True for every t);
+       * rows outside the window that still carry data are WIPED when they
+         are upcoming/dateless (impossible data) or when they hold the exact
+         phantom payload the incident spread — better blank than wrong."""
+    ipos_local = rows("SELECT id, name, open_date, close_date, sub_json FROM ipos")
     if not ipos_local:
         return {"ok": True, "matched": 0}
     iji = {}
@@ -1440,14 +1460,54 @@ def refresh_subscriptions():
     except Exception as e:
         errors.append(f"chittorgarh: {e}")
     matched = 0
+    cleared = 0
+    day = ist_now().date()
     now = ist_now().isoformat(timespec="seconds")
+
+    def _d(v):
+        try:
+            return date.fromisoformat((v or "")[:10])
+        except ValueError:
+            return None
+
+    def _in_window(ipo):
+        od = _d(ipo.get("open_date"))
+        if od is None:
+            return False                    # dateless rows never match
+        cd = _d(ipo.get("close_date")) or (od + timedelta(days=4))
+        return od <= day <= cd + timedelta(days=1)
+
+    def _wipe(ipo):
+        nonlocal cleared
+        run("UPDATE ipos SET sub_json='', sub_at='' WHERE id=?", (ipo["id"],))
+        cleared += 1
+        schedule_backup()
+
     for ipo in ipos_local:
+        stored = ipo.get("sub_json") or ""
+        if not _in_window(ipo):
+            if stored:
+                od = _d(ipo.get("open_date"))
+                upcoming = od is None or day < od
+                phantom = False
+                try:
+                    sj = json.loads(stored)
+                    phantom = (sj.get("src") == "iji" and sj.get("qib") == 12.68
+                               and sj.get("shni") == 4.09 and sj.get("bhni") == 7.78
+                               and sj.get("total") == 5.71)
+                except (TypeError, ValueError):
+                    pass
+                if upcoming or phantom:
+                    _wipe(ipo)
+            continue
         t = norm_name(ipo["name"])
         def find(pool):
             hit = pool.get(t)
             if hit:
                 return hit
-            return next((v for k, v in pool.items() if t and (t in k or k in t)), None)
+            return next((v for k, v in pool.items()
+                         if t and k and min(len(k), len(t)) >= 5
+                         and (t in k or k in t)), None)
         rec_ij = find(iji) or {}
         rec_cg = find(cg) or {}
         if not rec_ij and not rec_cg:
@@ -1468,8 +1528,9 @@ def refresh_subscriptions():
             run("UPDATE ipos SET sub_json=?, sub_at=? WHERE id=?", (payload, now, ipo["id"]))
             schedule_backup()
         matched += 1
-    print(f"[sub] matched {matched}/{len(ipos_local)} (cg:{len(cg)} iji:{len(iji)})", flush=True)
-    return {"ok": True, "matched": matched, "chittorgarh": len(cg), "ipoji": len(iji), "errors": errors}
+    print(f"[sub] matched {matched}/{len(ipos_local)} cleared {cleared} (cg:{len(cg)} iji:{len(iji)})", flush=True)
+    return {"ok": True, "matched": matched, "cleared": cleared,
+            "chittorgarh": len(cg), "ipoji": len(iji), "errors": errors}
 
 
 def _ipoji_listing_date(name: str) -> str:
