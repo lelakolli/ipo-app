@@ -352,6 +352,83 @@ window.calShift=(d)=>{
 // ---------- 🏆 win report by registrar (fix #24) ----------
 let luckOpen=localStorage.luckOpen==='1';   // persisted, survives the 60 s auto-poll like calDay
 window.luckToggle=()=>{luckOpen=!luckOpen;localStorage.luckOpen=luckOpen?'1':'0';renderDash();};
+let upiOpen=localStorage.upiOpen==='1';
+window.upiToggle=()=>{upiOpen=!upiOpen;localStorage.upiOpen=upiOpen?'1':'0';renderDash();};
+
+// ---- 💳 UPI allotment report + ownership (fix #26) ----
+const upiKeyOf=u=>(u||'').trim().toLowerCase().replace(/\s+/g,' ');
+const upiOwnMap=()=>{const m={};(S.upi_owners||[]).forEach(o=>m[o.key]=o);return m;};
+function upiGroups(){
+  const g={};
+  S.applications.filter(a=>a.applied).forEach(a=>{
+    const raw=(a.upi||'').trim(); if(!raw)return;
+    const k=upiKeyOf(raw), e=g[k]=g[k]||{disp:{},apps:0,wins:[]};
+    e.apps++; e.disp[raw]=(e.disp[raw]||0)+1;
+    if(a.allotment==='allotted'&&(a.allotted_qty||0)>0)e.wins.push(a);});
+  return Object.entries(g).map(([k,e])=>({k,disp:Object.entries(e.disp).sort((x,y)=>y[1]-x[1])[0][0],apps:e.apps,wins:e.wins}))
+    .sort((x,y)=>(y.wins.length-x.wins.length)||(y.apps-x.apps)||x.disp.localeCompare(y.disp));
+}
+const upiEnc=s=>encodeURIComponent(s);   // quote/XSS-safe embedding into onclick handlers
+function renderUpiCard(){
+  const groups=upiGroups(), om=upiOwnMap();
+  const winGroups=groups.filter(g=>g.wins.length);
+  const noUpi=S.applications.filter(a=>a.applied&&!(a.upi||'').trim()).length;
+  const body=upiOpen?`<div class="mut" style="font-size:11.5px;margin:6px 0 2px">one tap on a UPI = every allotment it won, with the applicant's name</div>
+    ${groups.length?groups.map(g=>{
+      const o=om[g.k];
+      const miniBtn=(ico,title)=>`<button class="btn sm ghost" style="padding:1px 8px;font-size:11.5px" title="${title}" onclick="event.stopPropagation();upiOwnerModal(decodeURIComponent('${upiEnc(g.disp)}'))">${ico}</button>`;
+      const owner=o?`<span class="chip c-open" title="Owner of this UPI">${o.friend_id?'🤝':'👤'} ${esc(o.owner)}</span>${miniBtn('✏️','Change owner')}`
+                   :miniBtn('❓ whose?','Tap to say whom this UPI belongs to');
+      const wl=g.wins.sort((x,y)=>((ipoById(y.ipo_id)||{}).listing_date||'').localeCompare((ipoById(x.ipo_id)||{}).listing_date||''))
+        .map(a=>{const i=ipoById(a.ipo_id)||{},ac=accById(a.account_id)||{};
+          return `<div style="padding:3px 0 3px 16px;font-size:12.5px;line-height:1.7"><b>${esc(ac.holder||'?')}</b> — <a style="color:inherit;text-decoration:underline;text-underline-offset:2px;cursor:pointer" onclick="goApps(${a.ipo_id})" title="Open this IPO">${esc(i.name||('IPO #'+a.ipo_id))}</a> (${num(a.allotted_qty)} sh)</div>`;}).join('');
+      return `<details style="border-top:1px solid var(--line);padding:7px 0">
+        <summary style="cursor:pointer;display:flex;flex-wrap:wrap;gap:6px;align-items:center;list-style:none">
+          <span class="mut" style="font-size:10px">▸</span><code style="font-size:13px">${esc(g.disp)}</code>
+          ${owner}
+          <span class="chip ${g.wins.length?'c-listed':''}" title="Allotments won via this UPI">🏆 ${g.wins.length} win${g.wins.length===1?'':'s'}</span>
+          <span class="chip" title="Applications filed with this UPI">${g.apps} app${g.apps===1?'':'s'}</span>
+        </summary>
+        ${wl||`<div class="mut" style="padding:4px 0 2px 16px;font-size:12.5px">— no allotments yet (${g.apps} application${g.apps===1?'':'s'})</div>`}
+      </details>`;}).join(''):'<div class="mut">No UPI-tagged applications yet.</div>'}
+    ${noUpi?`<div class="mut" style="font-size:11.5px;margin-top:7px">+ ${noUpi} application${noUpi===1?'':'s'} have no UPI recorded</div>`:''}`:'';
+  return `<div class="card" style="margin-bottom:14px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <b style="font-size:14px">💳 UPI allotment report <span class="mut" style="font-weight:500">${groups.length?`· ${groups.length} UPIs · ${winGroups.length} with wins`:'· none yet'}</span></b>
+      <button class="btn sm ghost" onclick="upiToggle()">${upiOpen?'▴ less':'▾ details'}</button>
+    </div>${body}
+  </div>`;
+}
+let _upiAsked={};   // asked once per session — the ❓ chip on the report is the standing invite
+window.maybeAskUpiOwner=upi=>{
+  const k=upiKeyOf(upi);
+  if(!k||upiOwnMap()[k]||_upiAsked[k])return;
+  if(document.getElementById('modal-bg').classList.contains('show'))return;  // one modal at a time
+  _upiAsked[k]=1;
+  upiOwnerModal(upi);
+};
+window.upiOwnerModal=upi=>{
+  const friends=(S.partner&&S.partner.friends)||[];
+  const known=[...new Set((S.upi_owners||[]).map(o=>o.owner).filter(Boolean))].slice(0,6);
+  openModal(`<div style="font-weight:800;font-size:16px;margin-bottom:6px">💳 UPI owner</div>
+    <div style="margin-bottom:9px">Whose UPI is <code style="font-size:13px">${esc(upi)}</code>?</div>
+    ${known.length?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${known.map(n=>`<button class="btn sm" onclick="upiOwnerSave(decodeURIComponent('${upiEnc(upi)}'),decodeURIComponent('${upiEnc(n)}'))">${esc(n)}</button>`).join('')}</div>`:''}
+    ${friends.map(f=>`<button class="btn sm" style="margin:0 6px 8px 0" title="Also starts partner money-tracking for this UPI" onclick="upiOwnerSave(decodeURIComponent('${upiEnc(upi)}'),'',${f.id})">🤝 ${esc(f.name)} — partner</button>`).join('')}
+    <div style="display:flex;gap:8px;margin-top:2px">
+      <input id="upi-own-name" placeholder="type a name — Dad, Siva…" style="flex:1">
+      <button class="btn sm" onclick="upiOwnerSave(decodeURIComponent('${upiEnc(upi)}'),document.getElementById('upi-own-name').value)">Save</button>
+    </div>
+    <div class="mut" style="font-size:11.5px;margin-top:9px">"Not now" keeps it as ❓ on the 💳 UPI report — label it later from there.</div>
+    <div style="text-align:right;margin-top:10px"><button class="btn sm ghost" onclick="closeModal()">Not now</button></div>`);
+};
+window.upiOwnerSave=async(upi,owner,fid)=>{
+  owner=(owner||'').trim();
+  if(!owner&&!fid)return toast('Type a name or pick the partner',1);
+  await api('/api/upi/owner','POST',{upi,owner,friend_id:fid});
+  S=await api('/api/state');
+  closeModal();toast('💳 saved — '+upi);
+  render();
+};
 // registrar -> {wins:[app], applied n, decided n}; per-holder win frequency inside
 // each registrar. Wins = allotment==='allotted' with a real share count; decided =
 // any registrar-verified outcome (allotted/not_allotted). Pure read of S.* — no
@@ -592,6 +669,7 @@ function renderDash(){
     <div class="kpi" onclick="dashDrill('unreal')" title="Tap for the break-up"><div class="l">Unrealized P&L</div><div class="v ${pnlCls(unreal)}">${pnlTxt(unreal)}</div><div class="s">open allotment positions at CMP</div></div>
   </div>
   ${renderLuckCard()}
+  ${renderUpiCard()}
   <div class="two">
     <div class="card"><h3>⚡ Needs your action <small>(${acts.length})</small></h3>
       ${acts.length?acts.map(a=>`<div style="padding:7px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:center">
@@ -1050,6 +1128,7 @@ async function saveRow(tr){
   if(!b.amount)delete b.amount;
   await api('/api/applications','POST',b);
   S=await api('/api/state');
+  maybeAskUpiOwner((appFor(selIpo,b.account_id)||{}).upi);   // fix #26: new UPI → ask whom it belongs to
   // lightly update row styling without full re-render jump
   if(b.applied&&!tr.querySelector('.f-lots').value)tr.querySelector('.f-lots').value=1;
   tr.querySelectorAll('input,select').forEach(x=>{if(!x.classList.contains('f-applied'))x.disabled=!b.applied;});
@@ -1143,7 +1222,9 @@ window.checkOne=async(accId)=>{
   if(ap&&ap.applied)body.applied=0;
   else{body.applied=1;body.lots=1;}
   await api('/api/applications','POST',body);
-  S=await api('/api/state');renderApps();};
+  S=await api('/api/state');
+  maybeAskUpiOwner((appFor(selIpo,accId)||{}).upi);   // fix #26
+  renderApps();};
 window.soldAllCmp=async()=>{
   const ipo=ipoById(selIpo);if(!ipo)return;
   if(!(ipo.cmp>0))return toast('CMP not set for this IPO yet — tap ↻ CMP on the IPOs tab first',1);

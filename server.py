@@ -169,6 +169,15 @@ def init_db():
             note TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
+        -- fix #26: UPI ownership map — one tap per UPI shows who won which
+        -- allotment; a never-seen UPI makes the app ask whom it belongs to.
+        CREATE TABLE IF NOT EXISTS upi_owners(
+            key TEXT PRIMARY KEY,          -- trimmed, whitespace-collapsed, case-folded UPI/label
+            upi TEXT NOT NULL,             -- preferred display spelling
+            owner TEXT DEFAULT '',         -- free-text owner name
+            friend_id INTEGER,             -- set when the UPI belongs to a partner
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
         CREATE TABLE IF NOT EXISTS gmp_hist(
             ipo_id INTEGER NOT NULL,
             day TEXT NOT NULL,
@@ -213,7 +222,7 @@ import arthan  # noqa: E402 — market-intelligence engine (self-verifying IPO d
 
 BACKUP_TABLES = ("accounts", "ipos", "applications", "push_subs", "kv",
                  "friends", "friend_vpas", "friend_ipo_pct", "friend_settlements",
-                 "friend_aliases", "friend_cash")
+                 "friend_aliases", "friend_cash", "upi_owners")
 # mirror paths follow the DB location (identical in production — DB lives in
 # DATA — but a test box pointing IPO_DB elsewhere no longer inherits the
 # production mirror file as its "local backup" restore source)
@@ -3116,12 +3125,14 @@ def state():
     try:
         _ps = partner_summary()
         partner_state = {"configured": bool(_ps["friends"]),
-                         "pending_total": _ps["pending_total"], "pending_n": _ps["pending_n"]}
+                         "pending_total": _ps["pending_total"], "pending_n": _ps["pending_n"],
+                         "friends": [{"id": f["id"], "name": f["name"]} for f in _ps["friends"]]}
     except Exception as e:
         print("[partner] state summary failed:", e, flush=True)
-        partner_state = {"configured": False, "pending_total": 0.0, "pending_n": 0}
+        partner_state = {"configured": False, "pending_total": 0.0, "pending_n": 0, "friends": []}
     return {
         "accounts": rows("SELECT * FROM accounts ORDER BY sort, holder, id"),
+        "upi_owners": rows("SELECT * FROM upi_owners"),
         "gmp_age_s": min((_ist_age_seconds(i.get("mkt_at") or "") for i in ipos if i.get("mkt_at")), default=None),
         "ipos": ipos,
         "applications": rows("SELECT * FROM applications"),
@@ -3708,6 +3719,55 @@ def save_application(b: dict = Body(...)):
     # UPI rotation: the per-application ("used") UPI is stored on this row only.
     # The account's DEFAULT UPI never changes from here — edit it in Accounts.
     return {"ok": True, "id": aid}
+
+
+# --- UPI ownership (fix #26) --------------------------------------------------
+# Every UPI string/label on an application can be mapped to its owner. The
+# dashboard renders one tap-to-expand row per UPI ("who got which allotment via
+# this UPI"); the frontend asks this question the first time it sees a new one.
+def _upi_key(u: str) -> str:
+    return re.sub(r"\s+", " ", (u or "").strip()).lower()
+
+
+@app.post("/api/upi/owner")
+def upi_owner_set(b: dict = Body(...)):
+    upi = re.sub(r"\s+", " ", str(b.get("upi") or "").strip())
+    if not upi:
+        raise HTTPException(400, "upi required")
+    owner = str(b.get("owner") or "").strip()[:80]
+    fid = b.get("friend_id")
+    if fid is not None:
+        fid = _i(fid, "friend_id")
+        fr = rows("SELECT id, name FROM friends WHERE id=?", (fid,))
+        if not fr:
+            raise HTTPException(404, "friend not found")
+        if not owner:                      # default the label to the friend's name
+            owner = fr[0]["name"]
+        if "@" in upi:
+            # a full VPA owned by the partner belongs in the money map too —
+            # partner detection then works for every future application
+            run("INSERT OR IGNORE INTO friend_vpas(friend_id, vpa) VALUES (?,?)", (fid, upi))
+    if not owner and fid is None:
+        raise HTTPException(400, "give an owner name or pick the partner")
+    key = _upi_key(upi)
+    run("""INSERT INTO upi_owners(key, upi, owner, friend_id) VALUES (?,?,?,?)
+           ON CONFLICT(key) DO UPDATE SET upi=excluded.upi, owner=excluded.owner,
+                                          friend_id=excluded.friend_id""",
+        (key, upi, owner, fid))
+    schedule_backup()
+    return {"ok": True, "key": key, "owner": owner}
+
+
+@app.delete("/api/upi/owner")
+def upi_owner_del(b: dict = Body(...)):
+    key = _upi_key(str(b.get("upi") or ""))
+    if not key:
+        raise HTTPException(400, "upi required")
+    # NOTE: we deliberately do NOT remove any friend_vpas row — partner money
+    # math must never silently lose a VPA; unlink it in the Partner tab instead.
+    run("DELETE FROM upi_owners WHERE key=?", (key,))
+    schedule_backup()
+    return {"ok": True}
 
 
 @app.post("/api/ipos/{iid}/mandates")
