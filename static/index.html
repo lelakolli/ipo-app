@@ -1012,7 +1012,9 @@ window.saveAcc=async(id)=>{
 // ---------- APPLICATIONS ----------
 function renderApps(){
   const el=document.getElementById('tab-apps');
-  if(!selIpo||!ipoById(selIpo))selIpo=(S.ipos.find(i=>i.status==='open')||S.ipos[0]||{}).id||null;
+  // fix #27: newest-first by open date; default = open, else upcoming, else newest — never CMR-from-June
+  const iposByAge=[...S.ipos].sort((x,y)=>((y.open_date||'').localeCompare(x.open_date||''))||y.id-x.id);
+  if(!selIpo||!ipoById(selIpo))selIpo=(iposByAge.find(i=>i.status==='open')||iposByAge.find(i=>i.status==='upcoming')||iposByAge[0]||{}).id||null;
   const ipo=selIpo?ipoById(selIpo):null;
   if(!ipo){el.innerHTML='<div class="card mut">Add an IPO first (IPOs tab).</div>';return;}
   const accts=S.accounts.filter(a=>a.active||appFor(ipo.id,a.id));
@@ -1051,7 +1053,7 @@ function renderApps(){
     el.innerHTML=`
     <div class="toolbar">
       <select id="ipo-sel" onchange="selIpo=+this.value;renderApps()">
-        ${S.ipos.map(i=>`<option value="${i.id}" ${i.id===ipo.id?'selected':''}>${esc(i.name)} (${STATUS_LABEL[i.status]||i.status})</option>`).join('')}
+        ${iposByAge.map(i=>`<option value="${i.id}" ${i.id===ipo.id?'selected':''}>${esc(i.name)} (${STATUS_LABEL[i.status]||i.status})</option>`).join('')}
       </select>
       <button class="btn ghost" onclick="applyCheckMode=false;renderApps()">← Exit check mode</button>
     </div>
@@ -1076,7 +1078,7 @@ function renderApps(){
   el.innerHTML=`
   <div class="toolbar">
     <select id="ipo-sel" onchange="selIpo=+this.value;renderApps()">
-      ${S.ipos.map(i=>`<option value="${i.id}" ${i.id===ipo.id?'selected':''}>${esc(i.name)} (${STATUS_LABEL[i.status]||i.status})</option>`).join('')}
+      ${iposByAge.map(i=>`<option value="${i.id}" ${i.id===ipo.id?'selected':''}>${esc(i.name)} (${STATUS_LABEL[i.status]||i.status})</option>`).join('')}
     </select>
     <button class="btn" onclick="applyAll()">⚡ Apply all active accounts</button>
     <button class="btn ghost" onclick="markAllMandates()" title="Mark mandate approved for every account in this IPO">✓ All mandates approved</button>

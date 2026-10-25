@@ -1684,6 +1684,14 @@ def gmp_evidence_stale(ipos) -> bool:
         pass
     newest = max((s for s in stamps if s), default="")
     return not newest or _ist_age_seconds(newest) > 12 * 60
+
+
+def yahoo_price(symbol):
+    """Yahoo chart quote — returns (regularMarketPrice, resolved symbol).
+
+    fix #27: this `def` line was once lost in an edit, leaving the body below
+    it orphaned (unreachable) inside gmp_evidence_stale — py_compile can't see
+    that, but every CMP update then crashed on NameError('yahoo_price')."""
     r = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.NS"
                      if not symbol.endswith((".NS", ".BO")) else
                      f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
@@ -1715,7 +1723,13 @@ def resolve_symbol(name):
             cn = norm_name(c.get("shortname") or c.get("longname") or c.get("symbol", ""))
             if cn == tgt or (tgt and (tgt in cn or cn in tgt)):
                 return c["symbol"].replace(".NS", "")
-        return cands[0]["symbol"].replace(".NS", "") if cands else ""
+        # fix #27: NEVER blind-accept the fuzzy top hit — "Bonfiglioli
+        # Transmissions" got pinned to DHOOTTRANS this way. A wrong symbol is
+        # far worse than none (silent wrong CMP); unresolved stays manual.
+        if cands:
+            print(f"[symbol] no name match for '{name}' — rejected candidates: "
+                  + ", ".join(c.get("symbol", "?") for c in cands[:6]), flush=True)
+        return ""
     except Exception:
         return ""
 
