@@ -536,7 +536,12 @@ QUIET_START = 22 * 60          # 10:00 PM IST
 QUIET_END = 7 * 60             # 7:00 AM IST
 PUSH_MIN_GAP = 45 * 60         # seconds between automatic pushes
 PUSH_DAILY_CAP = 8             # automatic pushes per day, hard stop
-PUSH_NO_PUSH_KINDS = ("data_check",)   # ARTHAN hygiene findings: drawer-only
+# fix #28: "Allotment check due" nag is drawer-ONLY from now on — results
+# actually land ~21:30–22:30+ IST when he's asleep, and every evening alert
+# batch dragged that title back into a fresh push. The real news channel
+# (📢 allotment out!, notify_alotment_result) is untouched; re-enable by
+# removing "allotment" here.
+PUSH_NO_PUSH_KINDS = ("data_check", "allotment")   # drawer-only kinds, never push
 
 
 def _quiet_now() -> bool:
