@@ -601,6 +601,12 @@ function renderDash(){
 
   // action items
   const acts=[];
+  // fix #29: the core feature must never fail INVISIBLY (BLS Polymers result
+  // landed with no notification because the news toggle had been switched off)
+  if(S.push_devices===0&&localStorage.getItem('notifOn')==='1')
+    acts.push({t:'📵 No phone registered for alerts',d:'your push registration died — tap to re-register so results reach you',cls:'neg',act:`enableNotifs()`});
+  else if(S.push_prefs&&S.push_prefs.allotment===false)
+    acts.push({t:'🔕 No-allotment news muted',d:'🏆 wins still notify — flip the switch back on under 🔔 switches',cls:'',act:`toggleAlerts()`});
   mandPend.forEach(a=>{const i=ipoById(a.ipo_id),ac=accById(a.account_id);if(i&&i.status!=='listed')
     acts.push({t:'UPI mandate pending',d:`${esc(ac?ac.holder:'?')} — <b>${esc(i.name)}</b> • ${rs(a.amount)} ${a.upi?`• UPI: <code>${esc(a.upi)}</code>`:''}`,cls:'neg'});});
   apps.filter(a=>a.allotment==='not_allotted'&&a.refund==='pending').forEach(a=>{const i=ipoById(a.ipo_id),ac=accById(a.account_id);
@@ -1073,6 +1079,7 @@ function renderApps(){
   const uniqUpis=new Set(applied.map(x=>(x.upi||'').trim().toLowerCase()).filter(Boolean)).size;
   const blocked=applied.filter(a=>a.mandate_status==='approved'&&a.allotment!=='allotted'&&a.refund!=='received'&&!(a.sell_qty>0)).reduce((s,a)=>s+a.amount,0);
   const allot=applied.filter(a=>a.allotment==='allotted').length;
+  const decidedCnt=applied.filter(a=>a.allotment==='allotted'||a.allotment==='not_allotted').length;  // fix #29
   const stalePend=applied.filter(a=>a.allotment==='pending'&&(ipo.status==='listed'||ipo.status==='allotment_done'));
   const minAmt=ipo.price_max&&ipo.lot_size?ipo.price_max*ipo.lot_size:0;
   el.innerHTML=`
@@ -1087,6 +1094,7 @@ function renderApps(){
     <button class="btn ghost" onclick="soldAllPrice()" title="Enter ONE sell price — books every allotted, unsold share at that price">Sell ₹ for all</button>`:''}
     <button class="btn ghost" onclick="applyCheckMode=true;renderApps()" title="Simple tick-off view (big buttons) while applying in Groww">✔ Apply-check</button>
     <button class="btn warn" onclick="runAllotmentCheck()" id="chkbtn">🔍 Auto-check allotment (${esc(ipo.registrar)})</button>
+    ${decidedCnt?`<button class="btn ghost sm" onclick="resendResult()" title="Re-send the result notification for this IPO — for any push you missed">📲 Resend result push</button>`:''}
     ${ipo.registrar_link?`<a class="btn ghost sm" href="${ipo.registrar_link}" target="_blank">🔗 Registrar page</a>`:''}
     <span class="mut">1 lot ≈ ${minAmt?rs(minAmt):'set price band + lot size'}</span>
   </div>
@@ -1218,6 +1226,11 @@ window.resolvePending=async()=>{
   const r=await api(`/api/ipos/${ipo.id}/resolve_pending_allotments`,'POST',{});
   toast(`✅ ${r.updated} row(s) marked Not allotted — refund auto-queued; tap 🔓 All funds unblocked when money returns`);
   refreshHard(()=>!S.applications.some(x=>x.ipo_id===ipo.id&&x.applied&&x.allotment==='pending'));};
+window.resendResult=async()=>{
+  const ipo=ipoById(selIpo);if(!ipo)return;
+  const r=await api(`/api/ipos/${ipo.id}/notify_result`,'POST',{});
+  toast(r.pushed?`📲 sent — ${r.wins} win(s) / ${r.verdicts} verdict${r.verdicts===1?'':'s'} pushed to your phone`:
+    'Nothing pushed — wins always notify, so this IPO has no wins and the misses switch is OFF (🔔 settings)');};
 window.checkOne=async(accId)=>{
   const ap=appFor(selIpo,accId);
   const body={ipo_id:selIpo,account_id:accId,category:'Retail'};
@@ -1405,7 +1418,7 @@ window.enableNotifs=async()=>{
   }catch(e){toast('Live alerts ON in-app; background push failed: '+e.message,1);}
   updateNotifBtn();};
 const NOTIF_CATS=[
- ['allotment','📢 Allotment results','the moment a NEW allotment verdict is found'],
+ ['allotment','📢 No-allotment news','"nobody got shares" messages — 🏆 WINS ALWAYS notify, even if this is OFF'],
  ['close_today','⏰ Closes today','morning reminder for IPOs closing today'],
  ['mandate','⏳ Mandates pending','evening nag if UPI mandates are unapproved'],
  ['listing','🔔 Listing tomorrow','evening heads-up with your expected position'],

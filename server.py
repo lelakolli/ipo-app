@@ -1780,6 +1780,16 @@ def compute_alerts():
     apps = rows("""SELECT a.*, ac.holder, ac.auth_mode FROM applications a
                    JOIN accounts ac ON ac.id=a.account_id WHERE a.applied=1""")
     nm = {i["id"]: i for i in ipos}
+    # fix #29: a flipped core toggle must never be invisible again — the
+    # "allotment results" pref was OFF for days and the only evidence was
+    # silence. Drawer card (sev med = never pushed, so this can't nag).
+    try:
+        if not push_prefs().get("allotment", True):
+            alerts.append({"sev": "med", "kind": "prefs", "ipo_id": 0,
+                           "title": "Allotment news is muted (wins still push)",
+                           "detail": "'No-allotment' messages are OFF in 🔔 settings — tap it to turn back on"})
+    except Exception:
+        pass
     # partner UPI map for mandate nudges: when the pending mandate sits on the
     # PARTNER's UPI ID, the reminder must say whom to ping (fix #13)
     try:
@@ -3152,6 +3162,10 @@ def state():
     return {
         "accounts": rows("SELECT * FROM accounts ORDER BY sort, holder, id"),
         "upi_owners": rows("SELECT * FROM upi_owners"),
+        # fix #29: the core push feature must never fail INVISIBLY — the
+        # dashboard shows a line when news is muted or no phone is registered
+        "push_prefs": push_prefs(),
+        "push_devices": rows("SELECT COUNT(*) c FROM push_subs")[0]["c"],
         "gmp_age_s": min((_ist_age_seconds(i.get("mkt_at") or "") for i in ipos if i.get("mkt_at")), default=None),
         "ipos": ipos,
         "applications": rows("SELECT * FROM applications"),
@@ -4170,16 +4184,47 @@ def run_allotment_checks(ipo: dict, force: bool = False) -> list:
 
 
 def notify_alotment_result(ipo: dict, results: list):
-    if not push_prefs().get("allotment", True):
-        return
+    """The app's core promise: tell him the moment a verdict lands.
+
+    fix #29 — root cause of the silent BLS Polymers result: the `allotment`
+    pref was OFF (flipped earlier to chase the old nag), and this function
+    returned before sending anything. A WIN is never negotiable now — it
+    pushes even with the pref OFF. The pref only silences the noisy
+    "nobody got shares" message."""
     decided = [r for r in results if r.get("status") in ("ok", "not_found") and r.get("newly")]
     if not decided:
-        return
+        return False
     wins = [r for r in decided if r.get("status") == "ok"]
-    body = ("✅ " + "; ".join(f"{r['holder']} {r.get('allotted_qty') or ''}sh" for r in wins)) if wins \
-        else "No allotments this time — refunds will unblock in 1–2 days."
-    send_push(f"📢 {ipo['name'][:28]} — allotment out!",
-              f"{body}  ({len(wins)}/{len(decided)} allotted)", kind="urgent")
+    if wins:
+        names = ", ".join(f"{r['holder']} {r.get('allotted_qty') or ''}sh" for r in wins)
+        return bool(send_push(f"🏆 {ipo['name'][:26]} — YOU GOT ALLOTMENT!",
+                              f"✅ {names}  ({len(wins)}/{len(decided)} accounts allotted)", kind="urgent"))
+    if not push_prefs().get("allotment", True):
+        return False
+    return bool(send_push(f"📢 {ipo['name'][:28]} — allotment out!",
+                          "No allotments this time — refunds will unblock in 1–2 days."
+                          f"  (0/{len(decided)} allotted)", kind="urgent"))
+
+
+@app.post("/api/ipos/{iid}/notify_result")
+def replay_result(iid: int):
+    """fix #29: re-fire the result notification from what's already recorded.
+    A missed push must never be unrecoverable — this rebuilds the verdict list
+    from the DB (no registrar call) and pushes it again."""
+    ipo_l = rows("SELECT * FROM ipos WHERE id=?", (iid,))
+    if not ipo_l:
+        raise HTTPException(404, "ipo not found")
+    apps = rows("""SELECT a.allotment, a.allotted_qty, ac.holder FROM applications a
+                   JOIN accounts ac ON ac.id=a.account_id WHERE a.ipo_id=? AND a.applied=1""", (iid,))
+    decided = [{"status": "ok" if a["allotment"] == "allotted" else "not_found",
+                "holder": a["holder"], "allotted_qty": a.get("allotted_qty") or 0,
+                "newly": True}
+               for a in apps if a["allotment"] in ("allotted", "not_allotted")]
+    if not decided:
+        raise HTTPException(400, "no allotment verdicts recorded for this IPO yet")
+    wins = [r for r in decided if r["status"] == "ok"]
+    sent = notify_alotment_result(ipo_l[0], decided)
+    return {"ok": True, "verdicts": len(decided), "wins": len(wins), "pushed": bool(sent)}
 
 
 @app.post("/api/ipos/{iid}/check_allotment")
