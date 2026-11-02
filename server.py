@@ -1965,7 +1965,30 @@ def _auth_token() -> str:
 # fingerprint) instead of trusting year-old cookies.
 SESS_TTL = 300          # 5 minutes of no activity -> locked
 SESS_MAX = 12           # phone + desktop + a few spares; oldest evicted
-_sessions = {}          # token -> last activity epoch
+_sessions = {}          # token -> last activity epoch (hot cache)
+SESS_KV = "auth_sessions"   # fix #30: sha256(token) -> ts, survives a redeploy
+
+
+def _sess_hash(tok: str) -> str:
+    return hashlib.sha256((tok or "").encode()).hexdigest()
+
+
+def _sess_store() -> dict:
+    """Durable half of the session table. Holds HASHES only, so the token can
+    never be replayed from the GitHub backup branch."""
+    try:
+        d = json.loads(kv_get(SESS_KV, "{}") or "{}")
+        return d if isinstance(d, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _sess_persist(store: dict):
+    now = time.time()
+    keep = {h: ts for h, ts in store.items() if now - float(ts) <= SESS_TTL}
+    if len(keep) > SESS_MAX:                       # same cap as the hot cache
+        keep = dict(sorted(keep.items(), key=lambda kv: kv[1])[-SESS_MAX:])
+    kv_set(SESS_KV, json.dumps(keep))
 
 
 def _sess_new() -> str:
@@ -1975,6 +1998,9 @@ def _sess_new() -> str:
         for t, _ in sorted(_sessions.items(), key=lambda kv: kv[1])[:SESS_MAX // 2]:
             _sessions.pop(t, None)
     _sessions[tok] = now
+    st = _sess_store()
+    st[_sess_hash(tok)] = now
+    _sess_persist(st)
     return tok
 
 
@@ -1983,15 +2009,31 @@ def _sess_ok(tok: str) -> bool:
         return False
     now = time.time()
     ts = _sessions.get(tok)
-    if ts is None or now - ts > SESS_TTL:
-        _sessions.pop(tok, None)
+    if ts is None:
+        # fix #30: a redeploy used to wipe every session, so each deploy forced
+        # an unlock (and a flaky fingerprint prompt read as "app is not
+        # opening"). Rehydrate from the durable store instead.
+        ts = _sess_store().get(_sess_hash(tok))
+        if ts is None:
+            return False
+        _sessions[tok] = float(ts)
+    if now - float(ts) > SESS_TTL:
+        _sess_kill(tok)
         return False
-    _sessions[tok] = now   # slide: any activity resets the 5-minute clock
+    if now - float(ts) >= 60:          # slide: any activity resets the clock;
+        st = _sess_store()             # the durable copy follows at most 1/min
+        st[_sess_hash(tok)] = now
+        _sess_persist(st)
+    _sessions[tok] = now
     return True
 
 
 def _sess_kill(tok: str):
     _sessions.pop(tok or "", None)
+    if tok:
+        st = _sess_store()
+        if st.pop(_sess_hash(tok), None) is not None:
+            _sess_persist(st)
 
 
 UNLOCK_HTML = r"""<!DOCTYPE html><html><head><script>try{if(localStorage.getItem("ic-theme")==="light")document.documentElement.dataset.theme="light";}catch(_){}</script><meta charset="utf-8">
