@@ -2001,6 +2001,14 @@ def _sess_new() -> str:
     st = _sess_store()
     st[_sess_hash(tok)] = now
     _sess_persist(st)
+    # the durable copy only survives a redeploy if it LEAVES this box: Render
+    # hands every deploy a fresh container with no SQLite file, and boot
+    # restores from the GitHub backup branch. /api/unlock is deliberately
+    # excluded from backup scheduling, so the session write must ask itself.
+    try:
+        schedule_backup()
+    except Exception:
+        pass
     return tok
 
 
