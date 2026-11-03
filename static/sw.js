@@ -1,4 +1,4 @@
-const CACHE = 'ipo-center-v37';
+const CACHE = 'ipo-center-v38';
 const SHELL = ['/', '/manifest.json', '/static/icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -31,6 +31,12 @@ self.addEventListener('fetch', (e) => {
         if (resp.ok) {
           const copy = resp.clone();
           caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+          return resp;
+        }
+        // fix #31: a sleeping/waking host answers 5xx. Serve the cached shell so
+        // the user sees the app (which retries) instead of a browser error page.
+        if (resp.status >= 500) {
+          return caches.match(e.request).then((hit) => hit || caches.match('/').then((h2) => h2 || resp));
         }
         return resp;
       }).catch(() => caches.match(e.request).then((hit) => hit || caches.match('/')))

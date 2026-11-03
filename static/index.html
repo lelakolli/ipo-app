@@ -298,6 +298,9 @@ let curTab='dash', selIpo=null;
 // ---------- utils ----------
 const api=async(u,m='GET',b)=>{const r=await fetch(u,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});
   if(r.status===401){location.href='/';throw new Error('locked');}
+  // fix #31: a free host that is asleep (or swapping a deploy) answers 502/503/504.
+  // That is NOT an error to shout about — the boot screen counts it down quietly.
+  if(r.status===502||r.status===503||r.status===504){const e=new Error('server-waking');e.waking=1;throw e;}
   const j=await r.json().catch(()=>({})); if(!r.ok){toast(j.detail||j.error||'Error',1); throw new Error(j.detail||'err');} return j;};
 const rs=n=>'₹'+(Number(n)||0).toLocaleString('en-IN',{maximumFractionDigits:0});
 const num=n=>(Number(n)||0).toLocaleString('en-IN',{maximumFractionDigits:2});
@@ -330,7 +333,8 @@ async function refresh(){S=await api('/api/state');
 // not imagined yet surfaces as a loud ⚠, never silent wrong numbers.
 const refreshHard=(check)=>refresh().then(()=>{
   if(check&&!check())toast('⚠ Server did not keep that change — tap it again; if it repeats, tell me.',1);
-}).catch(()=>toast('Saved on server ✓ — but screen reload failed. Close & reopen to see the latest.',1));
+}).catch(e=>toast(e&&e.waking?'⚠ Server is waking up — that tap may NOT have saved. Wait ~30 s and tap it again.':
+  'Saved on server ✓ — but screen reload failed. Close & reopen to see the latest.',1));
 // batch #11 GMP freshness badges: show how old the displayed GMP's internet
 // timestamp is, gold-outline the chip once it crosses an hour.
 const gmpAge=ts=>{const t=new Date(ts);if(isNaN(t))return'';
@@ -1705,7 +1709,25 @@ window.closeModal=()=>document.getElementById('modal-bg').classList.remove('show
 document.getElementById('modal-bg').addEventListener('click',e=>{if(e.target.id==='modal-bg')closeModal();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
 
-refresh().catch(e=>toast('Failed to load: '+e.message,1)).finally(()=>{const b=document.getElementById('boot');if(b){b.classList.add('gone');setTimeout(()=>b.remove(),500);}});
+// fix #31: the free host sleeps when idle and answers 503 for ~30-60 s while it
+// wakes. Used to look like "the app is dead" — now it counts down and retries.
+const bootDone=()=>{const b=document.getElementById('boot');if(b){b.classList.add('gone');setTimeout(()=>b.remove(),500);}};
+const bootSay=h=>{const el=document.querySelector('#boot .boot-sub');if(el)el.innerHTML=h;};
+let bootTry_n=0;
+const bootTry=async()=>{
+  try{await refresh();bootDone();}
+  catch(e){
+    bootTry_n++;
+    if(e&&e.waking&&bootTry_n<24){
+      bootSay(`Waking the server… retry ${bootTry_n} in 5 s<br>free hosting sleeps when idle — it normally answers within a minute`);
+      setTimeout(bootTry,5000);
+    }else if(e&&e.waking){
+      bootSay('The server is still not answering.<br>Close this tab and open it again in 2 minutes — <b>your data is safe</b> (backed up to GitHub every change).');
+      bootDone();
+    }else{toast('Failed to load: '+e.message,1);bootDone();}
+  }
+};
+bootTry();
 if('serviceWorker'in navigator){
   navigator.serviceWorker.register('/sw.js').catch(()=>{});
   // auto-reload once when a new service worker takes over (picks up app updates itself)
