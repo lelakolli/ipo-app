@@ -7,6 +7,7 @@ Run:  python3 server.py   (then open http://localhost:8000)
 
 import base64
 import hashlib
+import html as html_mod   # fix #33: entity-safe scraping
 import json
 import os
 import re
@@ -1219,7 +1220,20 @@ MONTH_MAP = {m.lower(): i + 1 for i, m in enumerate(
 def _clean(x):
     x = re.sub(r"<[^>]+>", " ", x)
     x = x.replace("&#8377;", "₹").replace("&nbsp;", " ").replace("&amp;", "&")
+    # fix #33: decode EVERY entity here, before any downstream code strips on
+    # digits. A raw "&#x27;" inside "Shah Investor&#x27;s Home" used to survive
+    # to the name extractor, whose digit-fallback then cut the name to
+    # "Shah Investor&#x" and that junk went straight into the database.
+    x = html_mod.unescape(x)
+    x = re.sub(r"&#x?[0-9a-fA-F]*;?", " ", x)   # numeric entities, whole or cut off
     return re.sub(r"\s+", " ", x).strip()
+
+
+# fix #33: a trailing issue-date suffix only ("28 - 30 Sep", "30 Sep - 05 Oct",
+# "28 Sep", "28 Sep, 2026"). The old fallback stripped from the FIRST DIGIT,
+# which is how entity fragments ate company names.
+_DATE_TAIL = (r"\s+\d{1,2}\s*(?:-|\u2013|to)?\s*\d{0,2}\s*[A-Za-z]{3,9}\w*"
+              r"(?:\s*(?:-|\u2013|to)\s*\d{1,2}\s*[A-Za-z]{3,9}\w*)?(?:\s*,?\s*\d{4})?\s*$")
 
 
 def _mkdate(y, m, d):
@@ -1290,9 +1304,13 @@ def scrape_chittorgarh(max_detail=20):
             continue
         cell = _clean(re.search(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S).group(1))
         m = re.match(r"(.+?)\s*(?:\s+[A-Z]{1,3})?\s+(\d{1,2}\s*-\s*\d{1,2}\s+[A-Za-z]{3})\w*\s*$", cell)
-        name = m.group(1).strip() if m else re.sub(r"\s*\d.*$", "", cell).strip()
+        name = m.group(1).strip() if m else re.sub(_DATE_TAIL, "", cell).strip()
+        name = re.sub(r"&[a-zA-Z]{1,8}$", "", name).strip()      # entity cut off at the end
+        name = re.sub(r"\s+", " ", name).strip(" -\u2013\u2014\u00b7|:")
         date_txt = m.group(2) if m else ""
-        if not name or link.group(1) in seen:
+        if not name or "&#" in name or "<" in name or link.group(1) in seen:
+            if name and ("&#" in name or "<" in name):
+                print(f"[sync] skipped junk IPO name from Chittorgarh: {name!r}", flush=True)
             continue
         seen.add(link.group(1))
         out.append({"name": name, "dash_dates": date_txt,
@@ -1897,13 +1915,17 @@ def sync_live_ipos():
                 run(f"UPDATE ipos SET {sets} WHERE id=?", (*upd.values(), hit["id"]))
                 summary["updated"] += 1
         else:
-            run("""INSERT INTO ipos(name,registrar,open_date,close_date,price_min,price_max,
+            last_id = run("""INSERT INTO ipos(name,registrar,open_date,close_date,price_min,price_max,
                    lot_size,allotment_date,listing_date,board,gmp,source)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,'live')""",
                 (s["name"], s.get("registrar", "Other"), s.get("open_date", ""), s.get("close_date", ""),
                  s.get("price_min", 0), s.get("price_max", 0), s.get("lot_size", 0),
                  s.get("allotment_date", ""), s.get("listing_date", ""), "Mainboard", s.get("gmp", 0)))
             summary["added"] += 1
+            # fix #33: a row inserted during this same run was invisible to the
+            # matcher (the snapshot was taken before the loop), so one scrape
+            # listing an IPO twice created duplicates — Sonaselection 97/98.
+            existing.append(rows("SELECT * FROM ipos WHERE id=?", (last_id,))[0])
     try:
         summary["listings_recovered"] = recover_stale_listings()
     except Exception as e:
