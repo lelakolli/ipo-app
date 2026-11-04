@@ -1406,6 +1406,23 @@ function updateNotifBtn(){const b=document.getElementById('notif-btn');if(!b)ret
   b.textContent=notifOn?'🔔 Phone alerts ON':'🔔 Enable phone alerts';
   b.style.color=notifOn?'var(--grn)':'';}
 function _b64u8(s){const p='='.repeat((4-s.length%4)%4);const b=atob((s+p).replace(/-/g,'+').replace(/_/g,'/'));const a=new Uint8Array(b.length);for(let i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a;}
+// fix #32: Chrome silently rotates/expires push endpoints. When a send hits a
+// dead one the server prunes the row — and the phone goes DEAF with no trace
+// (that is exactly how his allotment alerts vanished). So on every boot we
+// re-assert our subscription; the server upserts, so this is idempotent.
+window.ensurePushSub=async(before)=>{
+  if(localStorage.getItem('notifOn')!=='1')return;
+  if(!('Notification'in window)||Notification.permission!=='granted')return;
+  try{
+    const reg=await navigator.serviceWorker.ready;
+    let sub=await reg.pushManager.getSubscription();
+    if(!sub){const vk=await api('/api/push/vapid');
+      sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:_b64u8(vk.key)});}
+    if(!sub)return;
+    await api('/api/push/subscribe','POST',{subscription:sub.toJSON()});
+    if(before===0)toast('📲 Phone alerts re-connected — you will get allotment news again');
+  }catch(e){/* the dashboard 📵 card covers the rest */}
+};
 window.enableNotifs=async()=>{
   if(!('Notification'in window))return toast('This browser has no notification support',1);
   if(localStorage.getItem('notifOn')==='1'){localStorage.setItem('notifOn','0');notifOn=false;
@@ -1715,7 +1732,8 @@ const bootDone=()=>{const b=document.getElementById('boot');if(b){b.classList.ad
 const bootSay=h=>{const el=document.querySelector('#boot .boot-sub');if(el)el.innerHTML=h;};
 let bootTry_n=0;
 const bootTry=async()=>{
-  try{await refresh();bootDone();}
+  try{await refresh();bootDone();
+    ensurePushSub(S.push_devices);}   // fix #32 — a dead push endpoint must heal itself
   catch(e){
     bootTry_n++;
     if(e&&e.waking&&bootTry_n<24){
