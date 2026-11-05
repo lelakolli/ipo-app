@@ -1439,12 +1439,12 @@ window.enableNotifs=async()=>{
   }catch(e){toast('Live alerts ON in-app; background push failed: '+e.message,1);}
   updateNotifBtn();};
 const NOTIF_CATS=[
- ['new_ipo','🆕 New IPO announced','the moment a fresh IPO appears — name, price band, lot size, opening date'],
- ['allotment','📢 No-allotment news','"nobody got shares" messages — 🏆 WINS ALWAYS notify, even if this is OFF'],
- ['close_today','⏰ Issue opens / closes today','9 AM: what to apply for in Groww • 2:30 PM last call if accounts are left'],
- ['mandate','⏳ Mandates pending','5:30 PM — one message per IPO if collect requests are still unapproved'],
- ['listing','🔔 Listing day','9:20 AM on listing day: SELL reminder with your unsold shares • evening before: heads-up'],
- ['gmp_swing','📈 GMP sharp moves',"≥20% jumps on IPOs you've applied in"],
+ ['new_ipo','🆕 New IPO announced','as and when a fresh IPO appears — name, price band, lot size, opening date'],
+ ['allotment','📢 No-allotment news','"nobody got shares" — as and when the registrar publishes. 🏆 WINS ALWAYS notify'],
+ ['close_today','⏰ Last day to apply','9 AM on closing day (with any unapproved mandates) • 2:30 PM if accounts are left'],
+ ['mandate','⏳ Mandate count','shown inside the closing-day message — no separate evening nag'],
+ ['listing','🔑🔔 Listing day','8:00 AM TPIN authorisation • 9:55 AM SELL reminder with your unsold shares'],
+ ['gmp_swing','📈 GMP sharp moves (off by default)',"≥20% jumps on IPOs you've applied in — not part of your daily list"],
  ['high_alert','⚠️ Important alerts','data verification divergences & critical checks'],
  ['quiet','🌙 Quiet hours (10 PM – 7 AM)','total silence overnight — everything is held for the 7 AM brief, which leads with your wins'],
 ];

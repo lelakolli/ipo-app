@@ -542,7 +542,14 @@ PUSH_DAILY_CAP = 8             # automatic pushes per day, hard stop
 # batch dragged that title back into a fresh push. The real news channel
 # (📢 allotment out!, notify_alotment_result) is untouched; re-enable by
 # removing "allotment" here.
-PUSH_NO_PUSH_KINDS = ("data_check", "allotment")   # drawer-only kinds, never push
+# fix #36: the 15-minute alert-diff channel no longer pushes ANY of these —
+# his spec is a fixed daily rhythm, so every reminder now comes from a timed
+# window in smart_alerts() (or from a live verdict / the 07:00 brief). These
+# stay in the 🔔 drawer with their live counts, they just never buzz the phone.
+#   data_check  hygiene findings          allotment  "check due" nag
+#   mandate     rides the closing-day push   listing  rides the 09:55 SELL push
+#   tpin        has its own 08:00 push
+PUSH_NO_PUSH_KINDS = ("data_check", "allotment", "mandate", "listing", "tpin")
 
 
 def _quiet_now() -> bool:
@@ -4524,8 +4531,10 @@ def push_new_alerts():
                   " • ".join(a["title"] for a in fresh[:3]) + ("…" if len(fresh) > 3 else ""))
 
 
+# fix #36 defaults = his list. gmp_swing defaults OFF (not on his list; the
+# switch is still there if he ever wants grey-market moves back).
 PUSH_PREF_DEFAULT = {"new_ipo": True, "allotment": True, "close_today": True,
-                     "mandate": True, "listing": True, "gmp_swing": True,
+                     "mandate": True, "listing": True, "gmp_swing": False,
                      "high_alert": True, "quiet": True}
 
 
@@ -4592,7 +4601,9 @@ def smart_alerts():
     # 0) fix #35 — NEW IPO announced. Fires once per IPO, ever (not once a day),
     #    batched into a single push so the 45-minute pacing gate cannot swallow
     #    the second and third names while they are already marked as seen.
-    if pref.get("new_ipo", True) and 480 <= hm <= 1200:
+    # fix #36: "as and when the update came" — no time window. If it is discovered
+    # overnight the push gate holds it and the 07:00 brief carries it.
+    if pref.get("new_ipo", True):
         seen_new = json.loads(kv_get("newipo_seen", "[]") or "[]")
         if not kv_get("newipo_seeded"):
             # first run after shipping: everything already in the list is old
@@ -4610,26 +4621,21 @@ def smart_alerts():
                 fire("newipo:batch", f"🆕 {len(fresh)} new IPO{'s' if len(fresh) > 1 else ''} announced",
                      names + ("…" if len(fresh) > 3 else ""))
                 kv_set("newipo_seen", json.dumps(seen_new + [i["id"] for i in fresh]))
-    # 1) closes today — morning heads-up (09:00-11:30)
+    # 1) LAST DAY TO APPLY — closes today (09:00-11:30). fix #36: this is the
+    #    single closing-day push, and it carries the pending-mandate count so a
+    #    separate evening mandate nag is no longer needed.
     if pref["close_today"] and 540 <= hm <= 690:
         for i in ipos_:
             if ipo_status(i) == "open" and i.get("close_date") == today and once(f"close:{i['id']}"):
-                sub = (json.loads(i.get("sub_json") or "{}")).get("total")
                 applied = sum(1 for a in apps_ if a["ipo_id"] == i["id"])
-                fire(f"close:{i['id']}", f"⏰ {i['name'][:28]} closes TODAY",
-                     f"GMP ₹{(i['gmp'] or 0):.0f}" + (f" • SUB {sub}×" if sub else "") +
-                     f" • applied {applied}/{accs_active} — apply before ~1 PM")
-    # 1b) OPENS today — apply in Groww (09:00-11:30, only while nothing applied)
-    if pref["close_today"] and 540 <= hm <= 690:
-        for i in ipos_:
-            if (ipo_status(i) == "open" and i.get("open_date") == today
-                    and i.get("close_date") != today and once(f"open:{i['id']}")
-                    and not any(a["ipo_id"] == i["id"] for a in apps_)):
-                fire(f"open:{i['id']}", f"📋 {i['name'][:28]} OPENS today",
-                     f"₹{(i.get('price_min') or 0):.0f}-{(i.get('price_max') or 0):.0f} • lot {i.get('lot_size') or '?'}"
-                     f" • closes {(i.get('close_date') or '?')[:10]} — apply in Groww")
-    # 1c) LISTS today — the money moment (09:15-10:00, only unsold allotted shares)
-    if pref["listing"] and 555 <= hm <= 600:
+                mand = sum(1 for a in apps_ if a["ipo_id"] == i["id"]
+                           and a.get("mandate_status") == "pending")
+                fire(f"close:{i['id']}", f"⏰ Last day to apply — {i['name'][:24]}",
+                     f"applied {applied}/{accs_active} • lot {i.get('lot_size') or '?'}"
+                     + (f" • ⚠ {mand} mandate{'s' if mand > 1 else ''} still unapproved" if mand else "")
+                     + " — apply before ~1 PM")
+    # 1c) SELL DAY — listing day at 09:55 (his exact ask), unsold shares only
+    if pref["listing"] and 595 <= hm <= 615:
         for i in ipos_:
             if i.get("listing_date") == today and once(f"sell:{i['id']}"):
                 sh = sum((a.get("allotted_qty") or 0) for a in apps_
@@ -4648,28 +4654,25 @@ def smart_alerts():
                 if applied < accs_active:
                     fire(f"close2:{i['id']}", f"⏰ Last call — {i['name'][:24]} closes today",
                          f"only {applied}/{accs_active} accounts applied")
-    # 2) mandates still pending — evening nag (17:00-18:30)
-    if pref["mandate"] and 1020 <= hm <= 1110:
-        by_ipo = {}
-        for a in apps_:
-            if a.get("mandate_status") == "pending":
-                by_ipo[a["ipo_id"]] = by_ipo.get(a["ipo_id"], 0) + 1
-        for iid, n in by_ipo.items():
-            i = next((x for x in ipos_ if x["id"] == iid), None)
-            if i and ipo_status(i) == "open" and once(f"mand:{iid}"):
-                fire(f"mand:{iid}", f"⏳ {n} UPI mandate{'s' if n > 1 else ''} pending — {i['name'][:20]}",
-                     "Approve the collect requests on the phones before the issue closes.")
-    # 3) lists tomorrow — evening heads-up (18:00-20:00)
-    if pref["listing"] and 1080 <= hm <= 1200:
-        for i in ipos_:
-            if i.get("listing_date") == tomorrow and once(f"list:{i['id']}"):
-                sh = sum((a.get("allotted_qty") or 0) for a in apps_
-                         if a["ipo_id"] == i["id"] and a.get("allotment") == "allotted")
-                est = ""
-                if i.get("gmp") and i.get("price_max"):
-                    est = f"Last GMP ₹{i['gmp']:.0f} → est ₹{i['price_max'] + i['gmp']:.0f}."
-                fire(f"list:{i['id']}", f"🔔 {i['name'][:28]} lists TOMORROW",
-                     (f"You hold {sh} shares. " if sh else "") + est)
+    # 1e) TPIN authorisation — listing-day morning at ~08:00 (his ask). Without it
+    #     the shares cannot be sold, so this is the one reminder that must not slip.
+    if pref["listing"] and 475 <= hm <= 500:
+        tpin_acc = {r["id"]: r["holder"] for r in rows("SELECT id, holder, auth_mode FROM accounts WHERE active=1")
+                    if (r.get("auth_mode") or "").upper() == "TPIN"}
+        if tpin_acc:
+            for i in ipos_:
+                if i.get("listing_date") == today and once(f"tpin:{i['id']}"):
+                    who = sorted({tpin_acc[a["account_id"]] for a in apps_
+                                  if a["ipo_id"] == i["id"] and a.get("allotment") == "allotted"
+                                  and (a.get("allotted_qty") or 0) > (a.get("sell_qty") or 0)
+                                  and a["account_id"] in tpin_acc})
+                    if who:
+                        fire(f"tpin:{i['id']}", f"🔑 TPIN needed to sell today — {i['name'][:20]}",
+                             f"{', '.join(who[:6])}{'…' if len(who) > 6 else ''} — authorise before 09:55")
+
+    # 2) REMOVED (fix #36): the 17:00 mandate nag and the 18:00 lists-tomorrow
+    #    heads-up. Mandates ride the closing-day push; the listing-day push is
+    #    the 08:00 TPIN + 09:55 SELL pair. Both are still visible in the 🔔 drawer.
     # 4) sharp GMP swing (≥20% & ≥₹5) on IPOs you applied in — any cycle
     snap = json.loads(kv_get("gmp_snap", "{}") or "{}")
     snap_changed = False
