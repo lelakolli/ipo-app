@@ -1439,6 +1439,7 @@ window.enableNotifs=async()=>{
   }catch(e){toast('Live alerts ON in-app; background push failed: '+e.message,1);}
   updateNotifBtn();};
 const NOTIF_CATS=[
+ ['new_ipo','🆕 New IPO announced','the moment a fresh IPO appears — name, price band, lot size, opening date'],
  ['allotment','📢 No-allotment news','"nobody got shares" messages — 🏆 WINS ALWAYS notify, even if this is OFF'],
  ['close_today','⏰ Issue opens / closes today','9 AM: what to apply for in Groww • 2:30 PM last call if accounts are left'],
  ['mandate','⏳ Mandates pending','5:30 PM — one message per IPO if collect requests are still unapproved'],

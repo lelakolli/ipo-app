@@ -4524,9 +4524,9 @@ def push_new_alerts():
                   " • ".join(a["title"] for a in fresh[:3]) + ("…" if len(fresh) > 3 else ""))
 
 
-PUSH_PREF_DEFAULT = {"allotment": True, "close_today": True, "mandate": True,
-                     "listing": True, "gmp_swing": True, "high_alert": True,
-                     "quiet": True}
+PUSH_PREF_DEFAULT = {"new_ipo": True, "allotment": True, "close_today": True,
+                     "mandate": True, "listing": True, "gmp_swing": True,
+                     "high_alert": True, "quiet": True}
 
 
 def push_prefs():
@@ -4589,6 +4589,27 @@ def smart_alerts():
         log[key] = today
         changed_log = True
 
+    # 0) fix #35 — NEW IPO announced. Fires once per IPO, ever (not once a day),
+    #    batched into a single push so the 45-minute pacing gate cannot swallow
+    #    the second and third names while they are already marked as seen.
+    if pref.get("new_ipo", True) and 480 <= hm <= 1200:
+        seen_new = json.loads(kv_get("newipo_seen", "[]") or "[]")
+        if not kv_get("newipo_seeded"):
+            # first run after shipping: everything already in the list is old
+            # news — mark it seen, otherwise he gets 78 pushes in one morning
+            kv_set("newipo_seen", json.dumps([i["id"] for i in ipos_]))
+            kv_set("newipo_seeded", "1")
+        else:
+            fresh = [i for i in ipos_ if i["id"] not in seen_new]
+            if fresh:
+                names = ", ".join(
+                    f"{i['name'][:22]} (₹{(i.get('price_min') or 0):.0f}-{(i.get('price_max') or 0):.0f}"
+                    f"{', lot ' + str(i['lot_size']) if i.get('lot_size') else ''}"
+                    f"{', opens ' + str(i.get('open_date'))[:10] if i.get('open_date') else ''})"
+                    for i in fresh[:3])
+                fire("newipo:batch", f"🆕 {len(fresh)} new IPO{'s' if len(fresh) > 1 else ''} announced",
+                     names + ("…" if len(fresh) > 3 else ""))
+                kv_set("newipo_seen", json.dumps(seen_new + [i["id"] for i in fresh]))
     # 1) closes today — morning heads-up (09:00-11:30)
     if pref["close_today"] and 540 <= hm <= 690:
         for i in ipos_:
