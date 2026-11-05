@@ -1440,12 +1440,12 @@ window.enableNotifs=async()=>{
   updateNotifBtn();};
 const NOTIF_CATS=[
  ['allotment','📢 No-allotment news','"nobody got shares" messages — 🏆 WINS ALWAYS notify, even if this is OFF'],
- ['close_today','⏰ Closes today','morning reminder for IPOs closing today'],
- ['mandate','⏳ Mandates pending','evening nag if UPI mandates are unapproved'],
- ['listing','🔔 Listing tomorrow','evening heads-up with your expected position'],
+ ['close_today','⏰ Issue opens / closes today','9 AM: what to apply for in Groww • 2:30 PM last call if accounts are left'],
+ ['mandate','⏳ Mandates pending','5:30 PM — one message per IPO if collect requests are still unapproved'],
+ ['listing','🔔 Listing day','9:20 AM on listing day: SELL reminder with your unsold shares • evening before: heads-up'],
  ['gmp_swing','📈 GMP sharp moves',"≥20% jumps on IPOs you've applied in"],
  ['high_alert','⚠️ Important alerts','data verification divergences & critical checks'],
- ['quiet','🌙 Quiet hours (10 PM – 7 AM)','total silence overnight — anything that happens is held and sent as one morning digest'],
+ ['quiet','🌙 Quiet hours (10 PM – 7 AM)','total silence overnight — everything is held for the 7 AM brief, which leads with your wins'],
 ];
 let NP={};
 async function loadNotifPrefs(){

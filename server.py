@@ -609,17 +609,61 @@ def send_push(title: str, body: str = "", url: str = "/", kind: str = "auto"):
     return bool(subs)
 
 
-def flush_held_pushes():
-    """Morning digest: everything held during quiet hours goes out as ONE push."""
+def morning_brief():
+    """fix #34 — the 07:00 brief. Everything suppressed overnight goes out as
+    ONE push, WINS FIRST (a 🏆 buried inside "3 overnight updates" is how the
+    most important news of his day used to read), then the day's to-dos:
+    what closes, what lists (sell!), how many mandates still need approving."""
     if not push_prefs().get("quiet", True) or _quiet_now():
         return
     held = json.loads(kv_get("push_held", "[]") or "[]")
-    if not held:
-        return
+    now = ist_now()
+    today = now.date().isoformat()
+    ipos_ = rows("SELECT * FROM ipos")
+    st = {i["id"]: ipo_status(i) for i in ipos_}
+    nm = {i["id"]: i for i in ipos_}
+    apps_ = rows("SELECT * FROM applications WHERE applied=1")
+    accs = len(rows("SELECT 1 x FROM accounts WHERE active=1")) or 1
+
+    wins = [str(h.get("t", "")) for h in held if str(h.get("t", "")).startswith("\U0001F3C6")]
+    rest = [str(h.get("t", "")) for h in held if not str(h.get("t", "")).startswith("\U0001F3C6")]
+
+    todo = []
+    for i in ipos_:
+        if st.get(i["id"]) == "open" and i.get("close_date") == today:
+            n = sum(1 for a in apps_ if a["ipo_id"] == i["id"])
+            todo.append(f"{i['name'][:16]} closes ({n}/{accs} applied)")
+        if i.get("listing_date") == today:
+            sh = sum((a.get("allotted_qty") or 0) for a in apps_
+                     if a["ipo_id"] == i["id"] and a.get("allotment") == "allotted"
+                     and (a.get("allotted_qty") or 0) > (a.get("sell_qty") or 0))
+            if sh:
+                todo.append(f"{i['name'][:16]} LISTS — sell {sh} sh")
+    mand = sum(1 for a in apps_ if a.get("mandate_status") == "pending"
+               and st.get(a["ipo_id"]) == "open")
+    if mand:
+        todo.append(f"{mand} mandate{'s' if mand > 1 else ''} to approve")
+    awaiting = [nm[k] for k, v in st.items() if v == "result_pending"
+                and any(a["ipo_id"] == k and a["allotment"] == "pending" for a in apps_)]
+    if awaiting:
+        todo.append(f"results awaited: {awaiting[0]['name'][:14]}" +
+                    (f" +{len(awaiting) - 1}" if len(awaiting) > 1 else ""))
+
     kv_set("push_held", "[]")
-    body = " • ".join(h["t"][:42] for h in held[:4]) + ("…" if len(held) > 4 else "")
-    send_push(f"🌅 {len(held)} overnight update{'s' if len(held) > 1 else ''}",
-              body, kind="urgent")
+    if not held and not todo:
+        return
+    parts = []
+    if wins:
+        parts.append(" · ".join(w.replace("\U0001F3C6 ", "")[:36] for w in wins[:2])
+                     + ("…" if len(wins) > 2 else ""))
+    if rest:
+        parts.append(f"{len(rest)} other overnight note{'s' if len(rest) > 1 else ''}")
+    if todo:
+        parts.append("Today: " + " · ".join(todo[:3]) + ("…" if len(todo) > 3 else ""))
+    title = (f"\U0001F3C6 YOU WON overnight — {len(wins)} IPO{'s' if len(wins) > 1 else ''}"
+             if wins else f"\U0001F305 {len(held)} overnight update{'s' if len(held) > 1 else ''}")
+    send_push(title[:60], " | ".join(parts)[:220] or "Nothing new — have a good session.",
+              kind="urgent")
 
 # ----------------------------------------------------------------------------
 # helpers
@@ -4444,7 +4488,9 @@ def _alert_key(a: dict) -> str:
     change used to mint a brand-new key → a fresh push every 15 min while the
     user was actively working through 15 accounts. One reminder per IPO ever;
     the live count stays visible in the in-app alert drawer."""
-    if a.get("kind") in ("allotment", "tpin"):
+    # fix #34: mandates join the per-IPO keys — 17 accounts used to mint 17
+    # distinct keys, so one IPO could burn the whole daily cap by itself.
+    if a.get("kind") in ("allotment", "tpin", "mandate"):
         return f"{a['kind']}|{a.get('ipo_id')}"
     return f"{a['kind']}|{a['title']}|{a['detail']}"
 
@@ -4508,9 +4554,18 @@ def api_set_push_prefs(b: dict = Body(...)):
 
 
 def smart_alerts():
-    """Convenience push pack — time-windowed nudges, each at most once/day:
-       closes-today (morning), mandates-pending (evening), lists-tomorrow
-       (evening), sharp GMP swing on applied IPOs (any refresh cycle)."""
+    """fix #34 — the daily push rhythm, built around his actual day (IST):
+         07:00 morning_brief()      overnight results (wins first) + today's to-dos
+         09:00-11:30 opens today    apply in Groww (only while nothing is applied)
+         09:15-10:00 LISTS today    the money moment — sell the allotted shares
+         09:00-11:30 closes today   apply before the ~1 PM broker cut-off
+         14:00-15:30 last call      second nudge if accounts are still unapplied
+         15:00+     verdicts        🏆 wins / 📢 misses, as the registrar publishes
+         17:00-18:30 mandates       approve collect requests before the issue closes
+         18:00-20:00 lists tomorrow prep: shares held + expected listing price
+         any time   GMP swing       only on IPOs he applied in
+         22:00-07:00 SILENCE        everything folds into the 07:00 brief
+       Each item fires at most once per day (push_log)."""
     if not rows("SELECT 1 x FROM push_subs LIMIT 1"):
         return
     pref = push_prefs()
@@ -4543,6 +4598,35 @@ def smart_alerts():
                 fire(f"close:{i['id']}", f"⏰ {i['name'][:28]} closes TODAY",
                      f"GMP ₹{(i['gmp'] or 0):.0f}" + (f" • SUB {sub}×" if sub else "") +
                      f" • applied {applied}/{accs_active} — apply before ~1 PM")
+    # 1b) OPENS today — apply in Groww (09:00-11:30, only while nothing applied)
+    if pref["close_today"] and 540 <= hm <= 690:
+        for i in ipos_:
+            if (ipo_status(i) == "open" and i.get("open_date") == today
+                    and i.get("close_date") != today and once(f"open:{i['id']}")
+                    and not any(a["ipo_id"] == i["id"] for a in apps_)):
+                fire(f"open:{i['id']}", f"📋 {i['name'][:28]} OPENS today",
+                     f"₹{(i.get('price_min') or 0):.0f}-{(i.get('price_max') or 0):.0f} • lot {i.get('lot_size') or '?'}"
+                     f" • closes {(i.get('close_date') or '?')[:10]} — apply in Groww")
+    # 1c) LISTS today — the money moment (09:15-10:00, only unsold allotted shares)
+    if pref["listing"] and 555 <= hm <= 600:
+        for i in ipos_:
+            if i.get("listing_date") == today and once(f"sell:{i['id']}"):
+                sh = sum((a.get("allotted_qty") or 0) for a in apps_
+                         if a["ipo_id"] == i["id"] and a.get("allotment") == "allotted"
+                         and (a.get("allotted_qty") or 0) > (a.get("sell_qty") or 0))
+                if sh:
+                    est = (f" • GMP ₹{(i.get('gmp') or 0):.0f} → est ₹{(i.get('price_max') or 0) + (i.get('gmp') or 0):.0f}"
+                           if i.get("gmp") else "")
+                    fire(f"sell:{i['id']}", f"🔔 {i['name'][:26]} LISTS today — SELL",
+                         f"{sh} shares unsold • CMP ₹{(i.get('cmp') or 0):.0f}{est}")
+    # 1d) closes today, LAST CALL (14:00-15:30, only if accounts still unapplied)
+    if pref["close_today"] and 840 <= hm <= 930:
+        for i in ipos_:
+            if ipo_status(i) == "open" and i.get("close_date") == today and once(f"close2:{i['id']}"):
+                applied = sum(1 for a in apps_ if a["ipo_id"] == i["id"])
+                if applied < accs_active:
+                    fire(f"close2:{i['id']}", f"⏰ Last call — {i['name'][:24]} closes today",
+                         f"only {applied}/{accs_active} accounts applied")
     # 2) mandates still pending — evening nag (17:00-18:30)
     if pref["mandate"] and 1020 <= hm <= 1110:
         by_ipo = {}
@@ -4651,7 +4735,7 @@ def scheduler():
             # overnight now that quiet hours have ended)
             if now - last["push"] > 15 * 60:
                 try:
-                    flush_held_pushes()
+                    morning_brief()
                     push_new_alerts()
                 except Exception as e:
                     print("[sched] push-alerts error:", e, flush=True)
